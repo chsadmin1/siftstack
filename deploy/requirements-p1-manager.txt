@@ -1,0 +1,8 @@
+# P1 List Manager: the Slack receiver + inline scheduler.
+# No Playwright, no OpenCV: every DataSift/SiftMap/Slack call in this package
+# is plain HTTP (urllib/requests), matching sms_agent's standalone path.
+fastapi>=0.115.0
+uvicorn>=0.32.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+tzdata>=2024.1

@@ -1,0 +1,34 @@
+# P1 List Manager: Slack receiver + inline weekly/monthly scheduler.
+#
+# Same shape as deploy/Dockerfile (the SMS agent): no Playwright, no OpenCV,
+# no Tesseract -- every call this package makes is plain HTTP. One always-on
+# machine, one volume, because the scheduler needs a specific business-local
+# fire time (Fly's own machine schedules are too coarse -- see schedule.py's
+# own docstring) and the receiver needs to be reachable for Slack's Events
+# API at any time, not just when a job is running.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY deploy/requirements-p1-manager.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Only the p1_manager package. Everything it needs is env-driven (DATASIFT_*,
+# SLACK_*), same as every other Fly-deployed piece of this repo -- no Deal
+# Room checkout, no .env file on the image.
+COPY src/p1_manager ./p1_manager
+
+# State (weekly cursor, monthly snapshots, pending Slack asks) and the
+# monthly CSV exports live on the mounted volume so they survive a redeploy.
+ENV SIFTSTACK_STATE_DIR=/data \
+    SIFTSTACK_OUTPUT_DIR=/data/output \
+    PYTHONPATH=/app/p1_manager
+
+EXPOSE 8080
+
+# The container has no .env; every secret arrives as a Fly secret.
+CMD ["uvicorn", "slack_app:app", "--host", "0.0.0.0", "--port", "8080", "--app-dir", "/app/p1_manager"]

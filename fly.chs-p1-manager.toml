@@ -1,0 +1,41 @@
+# fly.toml for Creative Home Solutions' own instance of the P1 List Manager.
+#
+# Same shape as fly.p1-manager.toml (525 Homes' instance) -- always-on, one
+# machine, one volume -- but a fully separate Fly app on CHS's own Fly.io
+# account, with its own DataSift credentials, its own Slack App, and its own
+# Slack channel. The two instances share nothing at runtime; they only share
+# the same src/p1_manager/ code and Dockerfile.
+#
+# P1_WEEKLY_DRY_RUN / P1_MONTHLY_DRY_RUN start at '1' on purpose -- flip to
+# '0' only after a manual /trigger test is confirmed end to end for this
+# account, same discipline as the first rollout.
+
+app = 'chs-p1-manager'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'deploy/Dockerfile.p1-manager'
+
+[env]
+  P1_TIMEZONE = 'America/New_York'
+  P1_WEEKLY_AT = '08:00'
+  P1_WEEKLY_DAY = 'saturday'
+  P1_MONTHLY_AT = '08:00'
+  P1_MONTHLY_DAY = '28'
+  P1_WEEKLY_DRY_RUN = '1'
+  P1_MONTHLY_DRY_RUN = '1'
+
+[[mounts]]
+  source = 'p1_manager_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

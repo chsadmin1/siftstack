@@ -1,0 +1,4 @@
+{
+  "_note": "First name (must match sms_senders.json values) -> Slack member id, for the @mention on a hot-lead handoff post. Get a member id from their Slack profile -> ... -> Copy member ID. Placeholder values below; replace with your own team's names and Slack member IDs before using the SMS agent.",
+  "ExampleName": "U00000000"
+}

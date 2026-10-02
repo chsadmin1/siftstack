@@ -1,0 +1,61 @@
+# fly.toml app configuration file generated for siftstack-sms-agent on 2026-08-20T12:26:26-04:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'siftstack-sms-agent'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'deploy/Dockerfile'
+
+[env]
+  SMS_AGENT_DATA_DIR = '/data'
+  SMS_AGENT_DB = '/data/sms_agent.db'
+  SMS_AGENT_DRY_RUN = '0'
+  SMS_AGENT_INLINE_WORKER = '1'
+  SMS_AGENT_LOCALITY = 'Jackson County'
+  SMS_AGENT_NUMBERS_FILE = '/data/sms_numbers.json'
+  SMS_AGENT_PHASE = '2'
+  SMS_AGENT_SENDERS_FILE = '/data/sms_senders.json'
+  SMS_AGENT_SLACK_IDS_FILE = '/data/slack_ids.json'
+  SMS_AGENT_TRANSPORT = 'api'
+  SMS_AGENT_CAMPAIGN = '1'
+  SMS_AGENT_CAMPAIGN_TZ = 'America/Chicago'
+  SMS_AGENT_CAMPAIGN_PRESET = 'D x D'
+  SMS_AGENT_VM_FOLLOWUP = '1'
+  # 2026-09-17 (Dan): all callers now share ONE sending number (816-955-3513,
+  # see config/sms_numbers.json), so the per-number cap/pacing became the
+  # account-wide cap/pacing. Raised from the default 25/day to 200/day to
+  # cover current volume (46-65+/day and growing), and MIN_GAP dropped from
+  # 600s to 120s so 200 sends still fit inside the 9am-6pm Central window
+  # (540 min / 120s = up to 270 slots) - the existing 60-180s randomized
+  # cursor spacing on top of that is what keeps it looking spread out rather
+  # than bursted, exactly like a person texting one at a time.
+  SMS_AGENT_DAILY_CAP = '200'
+  SMS_AGENT_MIN_GAP = '120'
+  SMRTPHONE_STATE_FILE = '/data/smrtphone_state.json'
+  # Wendy's daily top-35 picker (Acquisitions + Lead Flow). --doctor,
+  # --dry-run and verified single-record --commit runs of all 3 stages were
+  # done by hand on 2026-08-31/09-01, so this is now the deliberate go-live
+  # flip -- select fires daily, creating tasks + drafting text.
+  DAILY25_ENABLED = '1'
+  # Texting (the send/voicemail stages) stays OFF separately: Ty paused it
+  # 2026-08-31 over a cadence issue. DAILY25_TEXTING_ENABLED defaults to '0'
+  # when unset, so omitting it here is the deliberate "texting off" state --
+  # add it back as '1' once the cadence issue is resolved.
+
+[[mounts]]
+  source = 'sms_agent_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

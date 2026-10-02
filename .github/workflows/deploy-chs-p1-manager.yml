@@ -1,0 +1,72 @@
+name: Deploy P1 Manager
+
+# Bootstrap + deploy of chs-p1-manager on this account's own Fly.io account.
+# Runs entirely on GitHub's infrastructure rather than a local flyctl, which
+# has proven unreliable reaching Fly's API from a Windows box during this
+# platform's development. The app-create and volume-create steps are safe to
+# re-run (they no-op once those exist), so this workflow doubles as the
+# ongoing redeploy path -- just re-run it with the same org_slug any time
+# code or secrets need to go out.
+#
+# Sensitive values (DataSift creds, Slack bot token/signing secret, the
+# trigger secret) come from GitHub repo secrets, never from a dispatch
+# input, since dispatch inputs are NOT masked in the run log. The Slack
+# channel ID is the one exception -- not sensitive, so it's a plain input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_slug:
+        description: "Fly org slug this app lives under (only used if the app doesn't exist yet)"
+        required: true
+        type: string
+      slack_channel_id:
+        description: "Slack channel ID to post the weekly ask / monthly report to -- leave blank to skip"
+        required: false
+        type: string
+
+concurrency:
+  group: p1-manager-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create app (first run only)
+        run: flyctl apps create chs-p1-manager -o "${{ inputs.org_slug }}" || echo "app already exists, continuing"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Create volume (first run only)
+        run: |
+          if flyctl volumes list -a chs-p1-manager --json | grep -q '"Name": *"p1_manager_data"'; then
+            echo "volume already exists, continuing"
+          else
+            flyctl volumes create p1_manager_data -a chs-p1-manager --region iad --size 1 -y
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Push secrets
+        run: |
+          ARGS="DATASIFT_EMAIL=${{ secrets.DATASIFT_EMAIL }} DATASIFT_PASSWORD=${{ secrets.DATASIFT_PASSWORD }} P1_TRIGGER_SECRET=${{ secrets.P1_TRIGGER_SECRET }}"
+          if [ -n "${{ secrets.SLACK_BOT_TOKEN }}" ]; then
+            ARGS="$ARGS SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }} SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}"
+          fi
+          if [ -n "${{ inputs.slack_channel_id }}" ]; then
+            ARGS="$ARGS SLACK_CHANNEL_ID=${{ inputs.slack_channel_id }}"
+          fi
+          flyctl secrets set -a chs-p1-manager --stage $ARGS
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Deploy to Fly
+        run: flyctl deploy --remote-only -c fly.chs-p1-manager.toml -a chs-p1-manager
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
