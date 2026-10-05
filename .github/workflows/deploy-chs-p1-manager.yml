@@ -59,6 +59,9 @@ jobs:
           if [ -n "${{ secrets.SLACK_BOT_TOKEN }}" ]; then
             ARGS="$ARGS SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }} SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}"
           fi
+          if [ -n "${{ secrets.SLACK_APP_TOKEN }}" ]; then
+            ARGS="$ARGS SLACK_APP_TOKEN=${{ secrets.SLACK_APP_TOKEN }}"
+          fi
           if [ -n "${{ inputs.slack_channel_id }}" ]; then
             ARGS="$ARGS SLACK_CHANNEL_ID=${{ inputs.slack_channel_id }}"
           fi

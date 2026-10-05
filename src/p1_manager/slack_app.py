@@ -40,6 +40,9 @@ from pathlib import Path
 import requests
 from fastapi import BackgroundTasks, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from slack_sdk.socket_mode.builtin import SocketModeClient
+from slack_sdk.socket_mode.request import SocketModeRequest
+from slack_sdk.socket_mode.response import SocketModeResponse
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -238,6 +241,52 @@ def _startup() -> None:
     log.info("P1 List Manager receiver up")
     if os.environ.get("P1_INLINE_SCHEDULER", "1").strip() in ("1", "true", "yes", "on"):
         _start_inline_scheduler()
+    _start_socket_mode()
+
+
+def _handle_socket_mode_request(client: SocketModeClient, req: SocketModeRequest) -> None:
+    # Ack immediately -- Slack redelivers over the socket if we're slow or
+    # silent, same reasoning as the HTTP path returning 200 right away.
+    client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+    if req.type != "events_api":
+        return
+    event = (req.payload or {}).get("event") or {}
+    if (event.get("type") == "message" and not event.get("bot_id")
+            and event.get("thread_ts")):
+        try:
+            handle_reply(event["thread_ts"], event.get("text", ""), event.get("channel", ""))
+        except Exception:  # noqa: BLE001
+            log.exception("socket mode: handle_reply failed")
+
+
+def _start_socket_mode() -> None:
+    """Added 2026-10-05: this workspace's Slack Events API never delivered a
+    single real event over HTTP despite a verified Request URL, correct bot
+    scopes (channels:history/groups:history) and the bot sitting in the
+    channel -- confirmed by reading the deployed app's own logs, which show
+    exactly one successful /slack/events hit ever (the one-time URL
+    verification challenge). Socket Mode sidesteps that: this process opens
+    the connection TO Slack instead of waiting for Slack to call in, so
+    nothing about inbound webhook delivery can be silently blocked. The
+    /slack/events HTTP route is left in place as a harmless fallback --
+    `handle_reply`'s own resolved_targets guard means a reply landing via
+    both transports at once just reports "already added" on the second one.
+    """
+    import threading
+
+    app_token = os.environ.get("SLACK_APP_TOKEN", "").strip()
+    if not app_token:
+        log.info("SLACK_APP_TOKEN not set -- socket mode listener not started")
+        return
+
+    def _run() -> None:
+        client = SocketModeClient(app_token=app_token)
+        client.socket_mode_request_listeners.append(_handle_socket_mode_request)
+        client.connect()
+        log.info("socket mode connected")
+        threading.Event().wait()  # connect() returns immediately; keep this thread alive
+
+    threading.Thread(target=_run, daemon=True, name="p1-manager-socket-mode").start()
 
 
 def _start_inline_scheduler() -> None:

@@ -6,3 +6,9 @@ uvicorn>=0.32.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 tzdata>=2024.1
+# Socket Mode listener (src/p1_manager/slack_app.py's _start_socket_mode) --
+# slack_sdk.socket_mode.builtin has zero extra deps beyond this package
+# itself (pure stdlib ssl/socket), added because this workspace's Slack
+# Events API HTTP delivery never dispatched a single real event despite a
+# verified Request URL and correct scopes (2026-10-05).
+slack-sdk>=3.27.0
