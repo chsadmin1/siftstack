@@ -19,10 +19,14 @@ import { TextTouchAuditInsert, TextTouchAuditRecord } from '../db/schema';
  * SMS Provider Configuration
  *
  * Expects environment variables:
- * - SMS_PROVIDER: 'twilio' | 'aws-sns' | 'mock'
- * - SMS_ACCOUNT_ID: Provider account ID
- * - SMS_AUTH_TOKEN: Provider authentication token
- * - SMS_FROM_NUMBER: Sender phone number
+ * - SMS_PROVIDER: 'kixie' | 'twilio' | 'aws-sns' | 'mock'
+ * - For Kixie:
+ *   - KIXIE_API_KEY: API key from Kixie Dashboard
+ *   - KIXIE_BUSINESS_ID: Business ID from Kixie Dashboard
+ * - For Twilio:
+ *   - SMS_ACCOUNT_ID: Twilio Account SID
+ *   - SMS_AUTH_TOKEN: Twilio Auth Token
+ * - SMS_FROM_NUMBER: Sender phone number (optional, not used by Kixie)
  */
 interface SMSProvider {
   name: string;
@@ -48,6 +52,100 @@ class MockSMSProvider implements SMSProvider {
       return {
         success: false,
         error: 'Mock provider: simulated send failure',
+      };
+    }
+  }
+}
+
+/**
+ * Kixie SMS Provider
+ *
+ * Sends SMS via Kixie's REST API
+ * Requires: KIXIE_API_KEY, KIXIE_BUSINESS_ID
+ * API Docs: https://www.kixie.com/developer/automation-send-sms/
+ */
+class KixieSMSProvider implements SMSProvider {
+  name = 'kixie';
+  private apiKey: string;
+  private businessId: string;
+  private endpoint = 'https://apig.kixie.com/app/event';
+
+  constructor(apiKey: string, businessId: string) {
+    if (!apiKey || !businessId) {
+      throw new Error('Kixie provider requires KIXIE_API_KEY and KIXIE_BUSINESS_ID');
+    }
+    this.apiKey = apiKey;
+    this.businessId = businessId;
+  }
+
+  async send(phoneNumber: string, message: string): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    try {
+      // Validate phone number format (E.164)
+      if (!phoneNumber.match(/^\+?[1-9]\d{1,14}$/)) {
+        return {
+          success: false,
+          error: `Invalid phone number format. Expected E.164 format (e.g., +14155550123), got: ${phoneNumber}`,
+        };
+      }
+
+      // Ensure phone number is in E.164 format
+      const normalizedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
+
+      // Validate message length (160 chars for GSM, 70 for Unicode)
+      const hasUnicode = /[^\x00-\x7F]/.test(message);
+      const maxLength = hasUnicode ? 70 : 160;
+
+      if (message.length > maxLength) {
+        return {
+          success: false,
+          error: `Message too long. Max ${maxLength} characters for ${hasUnicode ? 'Unicode' : 'GSM'} text, got ${message.length}`,
+        };
+      }
+
+      // Prepare Kixie API request
+      const payload = {
+        businessid: this.businessId,
+        apikey: this.apiKey,
+        target: normalizedPhone,
+        eventname: 'sms',
+        message: message,
+        email: process.env.KIXIE_EMAIL || 'noreply@creativehomesolutions.org',
+      };
+
+      // Make API call to Kixie
+      const response = await fetch(this.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        return {
+          success: false,
+          error: `Kixie API error: ${response.status} ${response.statusText}`,
+        };
+      }
+
+      const result = await response.json();
+
+      // Kixie returns { success: boolean, result: { ... } }
+      if (result.success) {
+        return {
+          success: true,
+          messageId: `kixie-${Date.now()}-${normalizedPhone}`,
+        };
+      } else {
+        return {
+          success: false,
+          error: `Kixie API returned success=false: ${JSON.stringify(result)}`,
+        };
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown Kixie provider error',
       };
     }
   }
@@ -102,6 +200,11 @@ function getSMSProvider(): SMSProvider {
   const provider = process.env.SMS_PROVIDER || 'mock';
 
   switch (provider) {
+    case 'kixie':
+      return new KixieSMSProvider(
+        process.env.KIXIE_API_KEY || '',
+        process.env.KIXIE_BUSINESS_ID || ''
+      );
     case 'twilio':
       return new TwilioSMSProvider(
         process.env.SMS_ACCOUNT_ID || '',
