@@ -89,6 +89,8 @@ def run(live_model: bool = False) -> int:
     r = Results()
 
     # ---- stub every outbound edge -------------------------------------
+    # Kept so the provider routing itself can be asserted (section 13).
+    real_transport_send = transport.send
     transport.send = lambda to, body, frm="": (
         stub.sent.append((to, body, frm)) or smrtphone.SendResult(True, sms_id="stub")
     )
@@ -1388,6 +1390,207 @@ def run(live_model: bool = False) -> int:
             config.ALLOWED_IPS = []
     except ImportError as exc:
         r.check("fastapi TestClient available", False, str(exc))
+
+    # ---- 13. Kixie ---------------------------------------------------------
+    # The Creative Home Solutions deployment texts through Kixie. Every Kixie
+    # payload is translated into the smrtPhone-shaped event on the way in, so
+    # these checks pin the translation, the takeover rules it feeds, the exact
+    # send request, and that nothing credential-shaped reaches the event log.
+    print()
+    print("kixie provider")
+    import json as _json
+
+    from . import kixie
+
+    saved = {k: getattr(config, k) for k in (
+        "PROVIDER", "KIXIE_API_KEY", "KIXIE_BUSINESS_ID", "KIXIE_AGENT_EMAIL", "KIXIE_TEAM_SMS_ID")}
+    config.KIXIE_AGENT_EMAIL = "nick@example.com"
+    try:
+        inbound = kixie.normalize_webhook({"data": {
+            "hookevent": "sms", "direction": "incoming", "messageid": "kx-1",
+            "customernumber": "+12085550111 ", "businessnumber": " 12085550199",
+            "message": "who is this", "email": "nick%40example.com", "messageDate": "2026-10-06"}})
+        r.check("kixie incoming -> smsIncoming", inbound.get("event") == "smsIncoming", str(inbound.get("event")))
+        r.check("kixie incoming: customer is FROM, padded number cleaned",
+                inbound.get("from") == "+12085550111", repr(inbound.get("from")))
+        r.check("kixie incoming: business number is TO", inbound.get("to") == "+12085550199",
+                repr(inbound.get("to")))
+        r.check("kixie incoming carries message and messageid",
+                inbound.get("message") == "who is this" and inbound.get("smsId") == "kx-1")
+
+        ours = kixie.normalize_webhook({"data": {
+            "hookevent": "sms", "direction": "outgoing", "messageid": "kx-2",
+            "customernumber": "2085550111", "businessnumber": "2085550199",
+            "message": "Hi there", "email": "nick%40example.com"}})
+        r.check("kixie outgoing by the API user reads as the API surface",
+                ours.get("event") == "smsOutgoing" and ours.get("source") == "api"
+                and not ours.get("userName"), str({k: ours.get(k) for k in ("event", "source", "userName")}))
+        r.check("kixie outgoing: customer is TO", ours.get("to") == "+12085550111", repr(ours.get("to")))
+
+        human = kixie.normalize_webhook({"data": {
+            "hookevent": "sms", "direction": "outgoing", "customernumber": "2085550111",
+            "businessnumber": "2085550199", "message": "Hey it's Sam", "email": "sam%40example.com"}})
+        r.check("kixie outgoing by another user is a named human",
+                human.get("source") == "kixie-app" and human.get("userName") == "sam@example.com",
+                str({k: human.get(k) for k in ("source", "userName")}))
+
+        call = kixie.normalize_webhook({"data": {
+            "hookevent": "endcall", "customernumber": "2085550111",
+            "callDetails": {"callid": "c-9", "duration": "95", "email": "sam%40example.com",
+                            "callstatus": "answered"}}})
+        r.check("kixie endcall -> callEnded with seconds and call id",
+                call.get("event") == "callEnded" and call.get("duration") == 95
+                and call.get("callId") == "c-9", str(call))
+
+        dispo = kixie.normalize_webhook({"data": {
+            "hookevent": "disposition", "customernumber": "2085550111",
+            "activeCRM": {"name": "x", "token": "SECRET-CRM-TOKEN"}}})
+        r.check("kixie payloads are scrubbed of credentials before storage",
+                "SECRET-CRM-TOKEN" not in str(dispo), "activeCRM token leaked into the stored payload")
+
+        other = kixie.normalize_webhook({"data": {"hookevent": "voicemail"}})
+        res = engine.process("kixie", other)
+        r.check("unhandled kixie events are stored and ignored, not guessed at",
+                res.get("action") == "ignored", str(res))
+
+        res = engine.process("kixie", inbound)
+        r.check("a kixie inbound runs the normal inbound handler",
+                res.get("action") not in (None, "ignored", "error"), str(res)[:160])
+
+        # Call takeover, webhook form.
+        talk_phone = "2085550142"
+        store.map_phone(talk_phone, record_uuid="rec-kixie", context=ctx)
+        store.ensure_conversation(talk_phone)
+        short = engine.process("kixie", {"event": "callEnded", "phone": talk_phone, "duration": 20})
+        r.check("a short kixie call (voicemail range) is not a takeover",
+                short.get("action") == "ignored", str(short))
+        stranger = engine.process("kixie", {"event": "callEnded", "phone": "2085550999", "duration": 300})
+        r.check("a call to a number we never texted mints nothing",
+                stranger.get("action") == "ignored" and store.get_conversation("2085550999") is None,
+                str(stranger))
+        took = engine.process("kixie", {"event": "callEnded", "phone": talk_phone,
+                                        "duration": 120, "user": "sam@example.com"})
+        conv = store.get_conversation(talk_phone) or {}
+        r.check("a real kixie call pauses the thread",
+                took.get("action") == "call_takeover" and conv.get("state") == "paused",
+                f"{took} state={conv.get('state')}")
+
+        # The exact send request, single-sender mode then Team SMS mode.
+        captured = {}
+
+        class _Resp:
+            def __init__(self, code, body):
+                self.status_code, self._body = code, body
+                self.text = _json.dumps(body)
+
+            def json(self):
+                return self._body
+
+        def _post(url, params=None, json=None, timeout=None):
+            captured.update(url=url, params=params, json=json)
+            return _Resp(200, {"success": True})
+
+        real_post = kixie.requests.post
+        kixie.requests.post = _post
+        config.KIXIE_API_KEY, config.KIXIE_BUSINESS_ID = "kx-key", "10001"
+        config.KIXIE_TEAM_SMS_ID = ""
+        sent = kixie.send_sms("2085550111", "Hi there", "+12085550199")
+        body = captured.get("json") or {}
+        r.check("kixie send accepted on 2xx", sent.ok, sent.error)
+        r.check("kixie send puts the apikey in the query string",
+                (captured.get("params") or {}).get("apikey") == "kx-key", str(captured.get("params")))
+        r.check("kixie single-sender send names the agent user",
+                body.get("eventname") == "sms" and body.get("email") == "nick@example.com"
+                and body.get("businessid") == "10001", str(body))
+        r.check("kixie send target is E.164", body.get("target") == "+12085550111", repr(body.get("target")))
+
+        config.KIXIE_TEAM_SMS_ID = "team-7"
+        kixie.send_sms("2085550111", "Hi there", "+12085550199")
+        body = captured.get("json") or {}
+        r.check("kixie Team SMS send picks the FROM number",
+                body.get("eventname") == "bizsms" and body.get("id") == "team-7"
+                and body.get("fromNumber") == "12085550199" and "email" not in body, str(body))
+        config.KIXIE_TEAM_SMS_ID = ""
+
+        kixie.requests.post = lambda url, params=None, json=None, timeout=None: _Resp(
+            200, {"success": False, "message": "No SMS number assigned to your user account"})
+        refused = kixie.send_sms("2085550111", "Hi there")
+        r.check("a 2xx whose body reports failure is a failed send",
+                not refused.ok and "No SMS number" in refused.error, refused.error)
+
+        calls = {"n": 0}
+
+        def _bad(url, params=None, json=None, timeout=None):
+            calls["n"] += 1
+            return _Resp(401, {"error": "bad key"})
+
+        kixie.requests.post = _bad
+        rejected = kixie.send_sms("2085550111", "Hi there")
+        r.check("a kixie 4xx is not retried", not rejected.ok and calls["n"] == 1,
+                f"attempts={calls['n']} err={rejected.error}")
+        kixie.requests.post = real_post
+
+        # Provider routing.
+        routed = []
+        real_kixie_send = kixie.send_sms
+        kixie.send_sms = lambda to, body, frm="": (routed.append(to) or smrtphone.SendResult(True))
+        config.PROVIDER = "kixie"
+        real_transport_send("2085550111", "Hi there", "+12085550199")
+        r.check("transport sends through kixie when the provider is kixie", routed == ["2085550111"],
+                str(routed))
+        kixie.send_sms = real_kixie_send
+
+        config.KIXIE_API_KEY = ""
+        gaps = " ".join(config.missing())
+        r.check("doctor flags missing kixie credentials, not smrtPhone ones",
+                "KIXIE_API_KEY" in gaps and "SMRTPHONE_API_KEY" not in gaps, gaps[:200])
+
+        dnt_before = len(stub.dnt)
+        ok, detail, label = engine._provider_dnt("2085550111")
+        r.check("kixie opt-outs never call the smrtPhone DNT route",
+                label == "Kixie DNT" and not ok and len(stub.dnt) == dnt_before, f"{label} {detail}")
+        config.PROVIDER = "smrtphone"
+        _, _, label = engine._provider_dnt("2085550111")
+        r.check("smrtPhone deployments still use smrtPhone DNT", label == "smrtPhone DNT", label)
+
+        # The bundled 525 Slack ids must be switchable off for another business.
+        saved_bundled = config.BUNDLED_CONFIG
+        live = tmp / "slack_ids_live.json"
+        live.write_text(_json.dumps({"Nick": "U-NICK"}), encoding="utf-8")
+        bundled_dir = tmp / "bundled"
+        bundled_dir.mkdir(exist_ok=True)
+        (bundled_dir / "slack_ids.json").write_text(_json.dumps({"Wendy": "U-525"}), encoding="utf-8")
+        config.BUNDLED_CONFIG = bundled_dir
+        merged = config._merged_map(live, "slack_ids.json")
+        r.check("bundled config layers under the live file", merged == {"Wendy": "U-525", "Nick": "U-NICK"},
+                str(merged))
+        config.BUNDLED_CONFIG = None
+        merged = config._merged_map(live, "slack_ids.json")
+        r.check("bundled config off leaves only the deployment's own ids", merged == {"Nick": "U-NICK"},
+                str(merged))
+        config.BUNDLED_CONFIG = saved_bundled
+
+        # The HTTP route.
+        try:
+            from fastapi.testclient import TestClient
+
+            from . import receiver
+
+            config.WEBHOOK_SECRET = "selftest-secret"
+            with TestClient(receiver.app) as client:
+                resp = client.post("/hooks/wrong-secret/kixie", json={"data": {}})
+                r.check("kixie endpoint rejects a wrong secret", resp.status_code == 404,
+                        f"got {resp.status_code}")
+                resp = client.post("/hooks/selftest-secret/kixie", json={"data": {
+                    "hookevent": "sms", "direction": "incoming", "messageid": "kx-http-1",
+                    "customernumber": "2085550123", "businessnumber": "2085550199", "message": "hi"}})
+                r.check("kixie endpoint accepts and persists a post",
+                        resp.status_code == 200 and bool(resp.json().get("event_id")), str(resp.json()))
+        except ImportError as exc:
+            r.check("fastapi TestClient available (kixie)", False, str(exc))
+    finally:
+        for k, v in saved.items():
+            setattr(config, k, v)
 
     print()
     return r.report()

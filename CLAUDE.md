@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**SiftStack** is a full-stack real estate investing operations platform built around the DataSift.ai (REISift) CRM. This repository is Creative Home Solutions' own copy, forked from a larger internal codebase. It contains the full platform's source code, but **only one subsystem is currently configured and deployed for this account: the P1 List Manager** (see below). Everything else in `src/` is present but inert — no credentials, no deployment, no Fly app — until it's specifically set up for this account.
+**SiftStack** is a full-stack real estate investing operations platform built around the DataSift.ai (REISift) CRM. This repository is Creative Home Solutions' own copy, forked from a larger internal codebase. It contains the full platform's source code, but **only the P1 List Manager is currently configured and deployed for this account, with the SMS agent being set up** (see below). Everything else in `src/` is present but inert — no credentials, no deployment, no Fly app — until it's specifically set up for this account.
 
 ## P1 List Manager (the live subsystem)
 
@@ -22,6 +22,22 @@ python src/p1_manager/monthly.py --dry-run    # preview this month's refresh, no
 ```
 
 Deployment is via GitHub Actions (`.github/workflows/deploy-chs-p1-manager.yml`), not local `flyctl` — see that file's header comment for why.
+
+## SMS agent on Kixie (being set up, 2026-10)
+
+`src/sms_agent/` (the two-way texting agent: outreach from the `Autotext` preset, reply classification, opt-outs, hot-lead handoff to Slack) is being brought up for this account as the Fly app `chs-sms-agent` (`fly.chs-sms-agent.toml`, deployed by `.github/workflows/deploy-chs-sms-agent.yml`). It starts in `SMS_AGENT_DRY_RUN=1`, on Mountain time (`America/Boise`), signing texts as Nick. Full agent docs: `src/sms_agent/README.md`.
+
+The upstream agent was built on smrtPhone; this account uses **Kixie**, selected by `SMS_AGENT_PROVIDER=kixie` (`src/sms_agent/kixie.py`). `kixie.normalize_webhook` rewrites Kixie's SMS and `endcall` webhooks into the event shape the engine already speaks, so nothing downstream is vendor-specific. Kixie webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/kixie` (Kixie: Manage > Automations > Webhooks; add SMS with direction "all", and End Call).
+
+What Kixie's API does not have, and how the agent copes:
+- **No per-message FROM number** in single-sender mode: texts leave from the Kixie user named by `KIXIE_AGENT_EMAIL`, who must have an Outbound SMS Number. `KIXIE_TEAM_SMS_ID` switches to Team SMS, which can pick a number.
+- **No delivery-status webhook, no message-history API, no do-not-text API, no payload signature.** The smrtPhone reconcile and call-log sweep are skipped on Kixie; call takeover comes from the `endcall` webhook instead; opt-outs are suppressed locally and Slack-alerted for manual entry in Kixie.
+- The send response body is undocumented; a 2xx counts as sent unless the body reports failure, and the raw body is logged so the first live send shows the real shape.
+- API access needs the Professional tier and Kixie support switching it on, and **no text sends until A2P 10DLC is approved** through Kixie.
+
+DataSift's own Kixie integration (Settings > Integrations > Kixie, set up by Kixie's team) complements this: it logs the agent's texts and replies to each record's activity log and 1:1 SMS view, and updates phone statuses from call outcomes. Watch for a double count on the first live send, since both the agent and that integration may increment `sms_attempts`.
+
+`python src/sms_agent/cli.py selftest` runs 289 zero-network checks (section 13 is Kixie); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.
 
 ## The rest of the platform (present, not configured)
 

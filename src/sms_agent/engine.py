@@ -15,10 +15,24 @@ import logging
 import re
 from typing import Optional
 
-from . import classify, config, crm, escalate, respond, sender_pool, smrtphone, store
+from . import classify, config, crm, escalate, kixie, respond, sender_pool, smrtphone, store
 from .knowledge import touches
 
 log = logging.getLogger(__name__)
+
+
+def _provider_dnt(phone: str) -> tuple[bool, str, str]:
+    """Write an opt-out to the phone system's own do-not-text list.
+
+    Returns (ok, detail, label). Local suppression is applied by the callers
+    regardless, so a failure here never means we text the person again; it
+    means the phone system's own tools might, and a human should add it there.
+    """
+    if config.PROVIDER == "kixie":
+        ok, detail = kixie.add_to_dnt(phone)
+        return ok, detail, "Kixie DNT"
+    ok, detail = smrtphone.add_to_dnt(phone)
+    return ok, detail, "smrtPhone DNT"
 
 # Only these may ever be auto-sent, and only above the confidence floor.
 # Everything else drafts for a human regardless of how sure the model is.
@@ -57,11 +71,11 @@ def _suppress_unknown(phone: str, intent: str) -> list[str]:
     cancelled = store.cancel_queued(phone, reason)
     acts = [f"suppressed as {reason} (no record found; cancelled {cancelled} queued)"]
     if intent == "OPT_OUT":
-        ok, detail = smrtphone.add_to_dnt(phone)
-        acts.append(f"smrtPhone DNT: {'added' if ok else 'FAILED - ' + detail}")
+        ok, detail, label = _provider_dnt(phone)
+        acts.append(f"{label}: {'added' if ok else 'FAILED - ' + detail}")
         if not ok:
             escalate.alert(
-                "Opt-out could not be written to smrtPhone DNT",
+                f"Opt-out could not be written to {label}",
                 f"{phone} is suppressed on our side but ADD IT TO THE DNT LIST MANUALLY. {detail}",
             )
     return acts
@@ -261,8 +275,8 @@ def _do_opt_out(phone: str, record_uuid: str, matches: Optional[list] = None,
     cancelled = store.cancel_queued(phone, "opt-out")
     acts.append(f"suppressed locally (cancelled {cancelled} queued)")
 
-    ok, detail = smrtphone.add_to_dnt(phone)
-    acts.append(f"smrtPhone DNT: {'added' if ok else 'FAILED - ' + detail}")
+    ok, detail, label = _provider_dnt(phone)
+    acts.append(f"{label}: {'added' if ok else 'FAILED - ' + detail}")
 
     # Tag every record carrying this number, not just the one we texted. Skip
     # trace attaches one line to several owners; leaving the others untagged
@@ -983,6 +997,44 @@ def handle_datasift(payload: dict) -> dict:
             "note": "payload shape not recognized; see events table"}
 
 
+def handle_call_ended(payload: dict) -> dict:
+    """A call to someone we are texting just ended (Kixie `endcall` webhook).
+
+    The webhook form of call_takeover.py, which can only poll smrtPhone's call
+    log. Same rules: a call short enough to be a voicemail or a wrong number
+    is not a takeover, and a call to someone we have never texted mints no
+    conversation. A real conversation with the owner means a human has the
+    relationship now, so the agent goes quiet on every line of that record.
+    """
+    phone = store.clean_phone(payload.get("phone"))
+    secs = int(payload.get("duration") or 0)
+    if not phone:
+        return {"action": "ignored", "reason": "no counterparty number"}
+    if secs < config.CALL_TAKEOVER_MIN_SECONDS:
+        return {"action": "ignored", "reason": f"call {secs}s, under the takeover floor"}
+
+    conv = store.get_conversation(phone)
+    mapped = store.lookup_phone(phone)
+    if not conv and not mapped:
+        return {"action": "ignored", "reason": "not a number we text"}
+    if (conv or {}).get("state") not in ("active", None, ""):
+        return {"action": "already_inactive", "phone": phone}
+
+    caller = payload.get("user") or "a caller"
+    reason = f"human called ({caller}, {secs}s)"
+    store.ensure_conversation(phone)
+    store.pause_conversation(phone, reason)
+    cancelled = store.cancel_queued(phone, "human called them")
+    record_uuid = (conv or {}).get("record_uuid") or (mapped or {}).get("record_uuid") or ""
+    siblings = _pause_siblings(phone, record_uuid, reason)
+    if record_uuid and config.PHASE >= 2:
+        crm.add_tags(record_uuid, [config.TAG_AI_PAUSED])
+    log.info("call takeover on %s by %s (%ss); cancelled %s, paused %s sibling line(s)",
+             phone, caller, secs, cancelled, len(siblings))
+    return {"action": "call_takeover", "phone": phone, "cancelled": cancelled,
+            "siblings": siblings, "user": caller}
+
+
 # ---------------------------------------------------------------- dispatch
 
 HANDLERS = {
@@ -991,12 +1043,17 @@ HANDLERS = {
     "smsDeliveryCallback": handle_delivery,
     "addNumberToDNT": handle_dnt,
     "addNumberToDNC": handle_dnt,
+    "callEnded": handle_call_ended,
 }
 
 
 def process(source: str, payload: dict) -> dict:
     if source == "datasift":
         return handle_datasift(payload)
+    if source == "kixie" and str(payload.get("event") or "").startswith("kixie:"):
+        # Stored for the record (that is how the first real payloads get
+        # seen), but not an event the engine acts on.
+        return {"action": "ignored", "reason": f"kixie event {payload.get('event')!r} not handled"}
     handler = HANDLERS.get(payload.get("event") or "")
     if not handler:
         return {"action": "ignored", "reason": f"no handler for event {payload.get('event')!r}"}

@@ -9,6 +9,7 @@ silently lose events. Everything downstream runs in the worker.
 
 Endpoints (the secret is in the path because neither vendor signs its payload):
     POST /hooks/{secret}/smrtphone
+    POST /hooks/{secret}/kixie
     POST /hooks/{secret}/datasift
     GET  /health
 """
@@ -130,6 +131,28 @@ async def smrtphone_hook(
     if not isinstance(payload, dict):
         return {"ok": True, "note": "non-object payload ignored"}
     return _ingest("smrtphone", payload, background)
+
+
+@app.post("/hooks/{secret}/kixie")
+async def kixie_hook(secret: str, request: Request, background: BackgroundTasks) -> Any:
+    """Kixie SMS / call webhooks (Manage > Automations > Webhooks).
+
+    Translated into the smrtPhone-shaped event on the way in, so everything
+    downstream is vendor-blind. See kixie.normalize_webhook.
+    """
+    if not _authorized(secret, request):
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        raw = (await request.body()).decode("utf-8", "replace")
+        store.record_event("kixie", "unparseable", f"raw:{hash(raw)}", {"raw": raw[:4000]})
+        return {"ok": True, "note": "unparseable body logged"}
+    if not isinstance(payload, dict):
+        return {"ok": True, "note": "non-object payload ignored"}
+    from . import kixie
+
+    return _ingest("kixie", kixie.normalize_webhook(payload), background)
 
 
 @app.post("/hooks/{secret}/datasift")
