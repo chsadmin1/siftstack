@@ -1,0 +1,74 @@
+# fly.toml for Creative Home Solutions' own instance of the two-way SMS agent.
+#
+# Its own Fly app on CHS's Fly.io account, with CHS's DataSift account, Slack
+# channel and Anthropic key, texting through Kixie (SMS_AGENT_PROVIDER=kixie)
+# rather than smrtPhone, which the upstream SiftStack agent was built on.
+#
+# Market is Ada + Canyon counties, Idaho (Boise area), so every clock here is
+# Mountain time. The code defaults are Eastern and would text Idaho sellers
+# two hours early.
+#
+# Starts in DRY RUN on purpose: the agent builds the day's batch, classifies
+# replies and logs what it WOULD send, but sends nothing and writes nothing to
+# DataSift. Flip SMS_AGENT_DRY_RUN to '0' only after Kixie API access is live
+# and a watched canary send to a team phone has round-tripped (send, reply,
+# reply shows up in the logs). Set it HERE, never as a Fly secret: a Fly
+# secret silently overrides anything in this [env] block.
+#
+# Secrets (pushed by .github/workflows/deploy-chs-sms-agent.yml, never here):
+# ANTHROPIC_API_KEY, KIXIE_API_KEY, KIXIE_BUSINESS_ID, KIXIE_AGENT_EMAIL,
+# REISIFT_API_KEY, DATASIFT_EMAIL/PASSWORD, SMS_AGENT_SLACK_WEBHOOK,
+# SMS_AGENT_WEBHOOK_SECRET, and SMS_AGENT_NUMBERS (the sending pool).
+
+app = 'chs-sms-agent'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'deploy/Dockerfile'
+
+[env]
+  SMS_AGENT_PROVIDER = 'kixie'
+  SMS_AGENT_TRANSPORT = 'api'
+  # The image bundles config/slack_ids.json (placeholder ids in this repo) as a
+  # fallback layer under the volume copy. Off, so only real CHS ids are used.
+  SMS_AGENT_BUNDLED_CONFIG = 'off'
+  SMS_AGENT_DATA_DIR = '/data'
+  SMS_AGENT_DB = '/data/sms_agent.db'
+  SMS_AGENT_INLINE_WORKER = '1'
+  SMS_AGENT_NUMBERS_FILE = '/data/sms_numbers.json'
+  SMS_AGENT_SENDERS_FILE = '/data/sms_senders.json'
+  SMS_AGENT_SLACK_IDS_FILE = '/data/slack_ids.json'
+  SMS_AGENT_DRY_RUN = '1'
+  SMS_AGENT_PHASE = '2'
+  # No callers hired yet (Dan, 2026-10-06): every record signs as Nick until
+  # sms_senders.json maps real assignees.
+  SMS_AGENT_SENDER_NAME = 'Nick'
+  SMS_AGENT_HANDOFF_NAME = 'Nick'
+  # Fallback only; the record's own county wins when it has one.
+  SMS_AGENT_LOCALITY = 'the Boise area'
+  SMS_AGENT_CAMPAIGN = '1'
+  SMS_AGENT_CAMPAIGN_PRESET = 'Autotext'
+  SMS_AGENT_CAMPAIGN_TZ = 'America/Boise'
+  SMS_AGENT_BUSINESS_TZ = 'America/Boise'
+  # smrtPhone-only features. The reconcile backstop and call takeover read
+  # smrtPhone's message and call logs, and the voicemail follow-up reads its
+  # call dispositions. Kixie equivalents are phase 2 of the CHS rollout.
+  SMS_AGENT_RECONCILE_INTERVAL = '0'
+  SMS_AGENT_VM_FOLLOWUP = '0'
+  # The daily-35 picker is upstream-specific (its own caller and SiftLine boards).
+  DAILY25_ENABLED = '0'
+
+[[mounts]]
+  source = 'sms_agent_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

@@ -404,8 +404,11 @@ def run_once(with_reconcile: bool = True) -> dict:
 
     # Backstop poll. smrtPhone gives no delivery guarantee, so a dropped
     # webhook is a lost reply with nothing to notice it. This catches those.
+    # Both backstops below read smrtPhone's own logs. Kixie has no message
+    # history API, and its call takeover arrives as an `endcall` webhook
+    # instead (engine.handle_call_ended), so neither poll applies there.
     global _last_reconcile
-    if with_reconcile and config.RECONCILE_INTERVAL:
+    if with_reconcile and config.RECONCILE_INTERVAL and config.PROVIDER != "kixie":
         if time.time() - _last_reconcile >= config.RECONCILE_INTERVAL:
             _last_reconcile = time.time()
             try:
