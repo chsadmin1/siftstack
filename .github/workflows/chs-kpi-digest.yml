@@ -1,0 +1,70 @@
+name: Daily KPI digest
+
+# Reads the CHS KPI Google Sheet the sales team fills in each day and posts
+# the digest (per-rep numbers, funnel, costs) to the CHS sales Slack channel.
+# Source: src/kpi_bot/kpi_slack_bot.py. Template: docs/kpi/CHS-KPI-Tracking.xlsx.
+#
+# Runs weekdays at 5:00 PM Mountain. GitHub cron is UTC with no daylight
+# saving, so there are two triggers and the gate step below lets through
+# only the one that is 5 PM in Boise today.
+
+on:
+  schedule:
+    - cron: '0 23 * * 1-5'   # 5:00 PM MDT, Mon to Fri
+    - cron: '0 0 * * 2-6'    # 5:00 PM MST, Mon to Fri (UTC is already the next day)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: print the Slack message in the log, post nothing"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: chs-kpi-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Daylight-saving gate
+        id: gate
+        run: |
+          offset=$(TZ=America/Boise date +%z)
+          run=yes
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "$offset" = "-0600" ] && [ "${{ github.event.schedule }}" != "0 23 * * 1-5" ]; then run=no; fi
+            if [ "$offset" = "-0700" ] && [ "${{ github.event.schedule }}" != "0 0 * * 2-6" ]; then run=no; fi
+          fi
+          echo "Boise offset $offset, run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'yes'
+        run: pip install "gspread>=6.0.0" google-auth requests tzdata
+
+      - name: Post KPI digest
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          KPI_SPREADSHEET_ID: ${{ secrets.KPI_SPREADSHEET_ID }}
+          KPI_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_SALES_WEBHOOK_URL }}
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          KPI_COMPANY_NAME: Creative Home Solutions
+          KPI_TZ: America/Boise
+          KPI_REPS: ${{ vars.KPI_REPS }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python src/kpi_bot/kpi_slack_bot.py --dry-run
+          else
+            python src/kpi_bot/kpi_slack_bot.py
+          fi

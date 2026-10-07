@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**SiftStack** is a full-stack real estate investing operations platform built around the DataSift.ai (REISift) CRM. This repository is Creative Home Solutions' own copy, forked from a larger internal codebase. It contains the full platform's source code, but **only the P1 List Manager is currently configured and deployed for this account, with the SMS agent being set up** (see below). Everything else in `src/` is present but inert — no credentials, no deployment, no Fly app — until it's specifically set up for this account.
+**SiftStack** is a full-stack real estate investing operations platform built around the DataSift.ai (REISift) CRM. This repository is Creative Home Solutions' own copy, forked from a larger internal codebase. It contains the full platform's source code, but **the P1 List Manager is configured and deployed for this account, the SMS agent is being set up, and call coaching and the KPI digest run from GitHub Actions** (see below). Everything else in `src/` is present but inert — no credentials, no deployment, no Fly app — until it's specifically set up for this account.
 
 ## P1 List Manager (the live subsystem)
 
@@ -38,6 +38,15 @@ What Kixie's API does not have, and how the agent copes:
 DataSift's own Kixie integration (Settings > Integrations > Kixie, set up by Kixie's team) complements this: it logs the agent's texts and replies to each record's activity log and 1:1 SMS view, and updates phone statuses from call outcomes. Watch for a double count on the first live send, since both the agent and that integration may increment `sms_attempts`.
 
 `python src/sms_agent/cli.py selftest` runs 289 zero-network checks (section 13 is Kixie); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.
+
+## Call coaching and KPI digest (GitHub Actions, 2026-10)
+
+Two scheduled GitHub Actions jobs post to one CHS Slack channel (`SLACK_SALES_WEBHOOK_URL`). Setup and secrets: `docs/setup/chs-coaching-and-kpi.md`.
+
+- **Daily call coaching** (`.github/workflows/chs-call-coaching.yml`, Tue to Sat 7:30 AM Mountain): `src/call_coaching/kixie_daily_audit.py` reads yesterday's Kixie calls from `chs-sms-agent` (`GET /hooks/{secret}/calls`, built from stored `endcall` webhooks by `src/sms_agent/call_log.py`), samples 3 per rep, transcribes (`transcribe.py`, OpenRouter), grades with Claude against `skills/*-coach/references/rubric.md` (`grade.py`), appends to the call audit sheet (`append_audit_row.py`; the sheet's Call ID column is the de-dup ledger) and posts a Slack summary. The SmrtPhone path (`pull_calls.py`, `daily_audit.py`) is upstream's and unused here.
+- **Daily KPI digest** (`.github/workflows/chs-kpi-digest.yml`, weekdays 5 PM Mountain): `src/kpi_bot/kpi_slack_bot.py` reads the KPI Google Sheet reps fill in by hand (template `docs/kpi/CHS-KPI-Tracking.xlsx`) and posts per-rep numbers plus the funnel summary.
+
+GitHub cron has no daylight saving: each workflow has an MDT and an MST trigger and a gate step that runs only the one matching Boise time. Tests: `python tests/test_chs_coaching_kpi.py`.
 
 ## The rest of the platform (present, not configured)
 

@@ -11,6 +11,7 @@ Endpoints (the secret is in the path because neither vendor signs its payload):
     POST /hooks/{secret}/smrtphone
     POST /hooks/{secret}/kixie
     POST /hooks/{secret}/datasift
+    GET  /hooks/{secret}/calls?since=&until=   (Kixie call log, for coaching)
     GET  /health
 """
 from __future__ import annotations
@@ -168,6 +169,20 @@ async def datasift_hook(secret: str, request: Request, background: BackgroundTas
     if not isinstance(payload, dict):
         payload = {"payload": payload}
     return _ingest("datasift", payload, background)
+
+
+@app.get("/hooks/{secret}/calls")
+def kixie_calls(secret: str, request: Request, since: str, until: str) -> Any:
+    """Kixie call log for the coaching job (src/call_coaching/kixie_daily_audit.py).
+
+    Read-only, behind the same secret path as the webhooks, because it carries
+    seller phone numbers and recording links. since/until are UTC ISO stamps.
+    """
+    if not _authorized(secret, request):
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    from . import call_log
+
+    return {"ok": True, "calls": call_log.calls_between(since, until)}
 
 
 @app.get("/health")

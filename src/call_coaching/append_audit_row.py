@@ -1,8 +1,7 @@
 """append_audit_row.py - append graded call rows to the Daily Call Audit Google Sheet.
 
-Target sheet (fixed, one continuous log, never a new tab):
-  https://docs.google.com/spreadsheets/d/16smYV-EXVzN4dN4sQEGbLBvTbdoxwCheUaqe5Hoao2k/edit
-  tab "Sheet1" (verified live 2026-08-04).
+Target sheet: CALL_AUDIT_SPREADSHEET_ID, tab CALL_AUDIT_TAB (default "Sheet1"),
+from the environment or .env. One continuous log, never a new tab.
 
 Reads the ACTUAL header row from the sheet at run time and maps each input
 row by header name - so wherever the extra columns (Date reviewed, Number
@@ -31,33 +30,40 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SPREADSHEET_ID = "16smYV-EXVzN4dN4sQEGbLBvTbdoxwCheUaqe5Hoao2k"
-TAB_NAME = "Sheet1"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def _env(key: str) -> str:
-    txt = (ROOT / ".env").read_text(encoding="utf-8")
+    # The process environment wins, so a CI job (no .env) can run this too.
+    if os.environ.get(key):
+        return os.environ[key].strip()
+    env_file = ROOT / ".env"
+    txt = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
     m = re.search(rf"^{key}\s*=\s*(\S+)", txt, re.MULTILINE)
     if not m:
-        raise KeyError(f"{key} not set in .env")
+        raise KeyError(f"{key} not set in the environment or .env")
     return m.group(1).strip()
+
+
+def _sheet() -> tuple[str, str]:
+    return _env("CALL_AUDIT_SPREADSHEET_ID"), os.environ.get("CALL_AUDIT_TAB", "Sheet1")
 
 
 def _range_url(updated_range: str) -> str:
     """Deep-link straight to the rows just appended (Sheets opens scrolled to
     and with this range selected) rather than just the sheet's front page."""
     cell_range = updated_range.split("!", 1)[-1]
-    return f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid=0&range={cell_range}"
+    return f"https://docs.google.com/spreadsheets/d/{_sheet()[0]}/edit#gid=0&range={cell_range}"
 
 
 def _notify_slack(range_url: str) -> None:
-    """Post to #2-deals-a-week that today's batch is ready. Best-effort - a
+    """Post to the call-audit Slack channel that today's batch is ready. Best-effort - a
     missing webhook or a failed post never fails the append itself, since the
     rows are already safely in the sheet by the time this runs."""
     try:
@@ -85,11 +91,25 @@ def _build_service():
 
 
 def get_headers(svc) -> list[str]:
+    sheet_id, tab = _sheet()
     resp = svc.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f"'{TAB_NAME}'!1:1"
+        spreadsheetId=sheet_id, range=f"'{tab}'!1:1"
     ).execute()
     rows = resp.get("values", [])
     return rows[0] if rows else []
+
+
+def column_values(header: str) -> set[str]:
+    """Every value already in the column under `header` (blank set if no such
+    column). Used as the de-dup ledger by jobs that run without a disk."""
+    svc = _build_service()
+    sheet_id, tab = _sheet()
+    norm = [h.strip() for h in get_headers(svc)]
+    if header not in norm:
+        return set()
+    col = norm.index(header)
+    resp = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{tab}'").execute()
+    return {str(r[col]).strip() for r in resp.get("values", [])[1:] if len(r) > col and str(r[col]).strip()}
 
 
 def build_rows(records: list[dict], headers: list[str]) -> list[list[str]]:
@@ -112,21 +132,22 @@ def build_rows(records: list[dict], headers: list[str]) -> list[list[str]]:
     return rows
 
 
-def append(records: list[dict]) -> dict:
+def append(records: list[dict], notify: bool = True) -> dict:
     if not records:
         return {"success": True, "appended": 0}
 
     svc = _build_service()
     headers = get_headers(svc)
+    sheet_id, tab = _sheet()
     if not headers:
-        return {"success": False, "error": f"could not read header row from '{TAB_NAME}'!1:1"}
+        return {"success": False, "error": f"could not read header row from '{tab}'!1:1"}
 
     rows = build_rows(records, headers)
 
     try:
         result = svc.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"'{TAB_NAME}'!A1",
+            spreadsheetId=sheet_id,
+            range=f"'{tab}'!A1",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
             body={"values": rows},
@@ -138,13 +159,15 @@ def append(records: list[dict]) -> dict:
                     "(Share -> paste its client_email from GOOGLE_SERVICE_ACCOUNT_KEY -> Editor).")
         return {"success": False, "error": msg}
 
-    sheet_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit"
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
     updates = result.get("updates", {})
     updated_range = updates.get("updatedRange")
-    if updated_range:
-        _notify_slack(_range_url(updated_range))
+    range_url = _range_url(updated_range) if updated_range else sheet_url
+    if notify and updated_range:
+        _notify_slack(range_url)
 
-    return {"success": True, "appended": len(rows), "sheet_url": sheet_url, "updates": updates}
+    return {"success": True, "appended": len(rows), "sheet_url": sheet_url,
+            "range_url": range_url, "updates": updates}
 
 
 def main() -> int:
