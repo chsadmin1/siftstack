@@ -248,9 +248,18 @@ def _handle_socket_mode_request(client: SocketModeClient, req: SocketModeRequest
     # Ack immediately -- Slack redelivers over the socket if we're slow or
     # silent, same reasoning as the HTTP path returning 200 right away.
     client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
+    # Log every request type unconditionally (2026-10-09) -- a plain,
+    # non-threaded test message has no thread_ts at all, so the real filter
+    # below silently (and correctly) ignores it, which previously looked
+    # identical in the logs to Slack never delivering anything at all. This
+    # line exists so "nothing happened" can be told apart from "it arrived
+    # but didn't match."
+    log.info("socket mode: request type=%s", req.type)
     if req.type != "events_api":
         return
     event = (req.payload or {}).get("event") or {}
+    log.info("socket mode: event type=%s has_thread_ts=%s bot_id=%s",
+             event.get("type"), bool(event.get("thread_ts")), event.get("bot_id"))
     if (event.get("type") == "message" and not event.get("bot_id")
             and event.get("thread_ts")):
         try:
