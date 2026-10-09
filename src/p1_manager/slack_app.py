@@ -271,6 +271,15 @@ def _start_socket_mode() -> None:
     /slack/events HTTP route is left in place as a harmless fallback --
     `handle_reply`'s own resolved_targets guard means a reply landing via
     both transports at once just reports "already added" on the second one.
+
+    THE CONNECTION DOES NOT SELF-HEAL RELIABLY (Slack support, 2026-10-09):
+    a real event was dropped with "No websocket connection for <app id> via
+    http/1.1" even though our own logs showed the connection succeeding at
+    startup -- it had gone stale sometime between then and the real test,
+    with no error surfaced on our side at all. So this never just connects
+    once and waits; it proactively tears down and reconnects on a fixed
+    timer, and retries with a short backoff on any outright failure, rather
+    than trusting an indefinite wait to mean the socket is still alive.
     """
     import threading
 
@@ -279,12 +288,25 @@ def _start_socket_mode() -> None:
         log.info("SLACK_APP_TOKEN not set -- socket mode listener not started")
         return
 
+    RECYCLE_SECONDS = 600
+
     def _run() -> None:
-        client = SocketModeClient(app_token=app_token)
-        client.socket_mode_request_listeners.append(_handle_socket_mode_request)
-        client.connect()
-        log.info("socket mode connected")
-        threading.Event().wait()  # connect() returns immediately; keep this thread alive
+        while True:
+            try:
+                client = SocketModeClient(app_token=app_token)
+                client.socket_mode_request_listeners.append(_handle_socket_mode_request)
+                client.connect()
+                log.info("socket mode connected")
+            except Exception:  # noqa: BLE001
+                log.exception("socket mode: connect failed, retrying in 15s")
+                time.sleep(15)
+                continue
+            time.sleep(RECYCLE_SECONDS)
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            log.info("socket mode: recycling connection")
 
     threading.Thread(target=_run, daemon=True, name="p1-manager-socket-mode").start()
 
