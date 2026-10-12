@@ -16,7 +16,7 @@ import json
 import subprocess
 import sys
 
-REPO = "DataSift-Ty-Personal/SiftStack"
+REPO = "chsadmin1/siftstack"
 ORG = REPO.split("/")[0]
 
 # The people who are supposed to have write access. Anyone else showing up is

@@ -100,6 +100,13 @@ def post_weekly_ask(preset_name: str, rows: list[dict]) -> str | None:
     return resp.get("ts") if resp.get("ok") else None
 
 
+def post_to_channel(text: str) -> str | None:
+    """Plain post to the P1 channel; returns the message ts (the thread key)."""
+    resp = _call("chat.postMessage", {"channel": _env("SLACK_CHANNEL_ID"), "text": text,
+                                      "unfurl_links": False})
+    return resp.get("ts") if resp.get("ok") else None
+
+
 def post_monthly_report(report_text: str, csv_path: str | None = None) -> None:
     channel = _env("SLACK_CHANNEL_ID")
     # Slack truncates very long messages; keep the headline in chat and let
@@ -192,6 +199,12 @@ def handle_reply(thread_ts: str, text: str, channel: str) -> None:
     pending = state.load_pending_asks().get(thread_ts)
     if not pending:
         return  # a reply to something we're not tracking
+
+    if pending.get("kind") == "enrich":  # a phone-enrichment cost preview (enrich.py)
+        import enrich
+        enrich.handle_reply(thread_ts, text, pending, lambda msg: _call("chat.postMessage", {
+            "channel": channel, "thread_ts": thread_ts, "text": msg}))
+        return
 
     client = DataSiftClient.from_env()
     match = resolve_board_phase(client, text)
@@ -371,6 +384,9 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
 
     POST /trigger/weekly?secret=...&only=Preset One|Preset Two&commit=true
     POST /trigger/monthly?secret=...&commit=false
+    POST /trigger/enrich?secret=...                       # run the enrichment preview now
+    POST /trigger/enrich?secret=...&only=List A|List B    # preview specific lists, even
+                                                          # ones already handled
 
     `only` is PIPE-separated, not comma-separated -- every real preset name
     in this account contains a comma ("... County, MO"), so splitting on
@@ -380,12 +396,18 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
     expected = os.environ.get("P1_TRIGGER_SECRET", "")
     if not expected or secret != expected:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if job not in ("weekly", "monthly"):
-        return JSONResponse({"error": "job must be 'weekly' or 'monthly'"}, status_code=400)
+    if job not in ("weekly", "monthly", "enrich"):
+        return JSONResponse({"error": "job must be 'weekly', 'monthly' or 'enrich'"},
+                            status_code=400)
 
     import schedule
 
     def _run():
+        if job == "enrich":
+            import enrich
+            names = [n.strip() for n in only.split("|") if n.strip()]
+            enrich.run_preview(post_to_channel, only_titles=names or None)
+            return
         if job == "weekly":
             names = [n.strip() for n in only.split("|") if n.strip()] or None
             post_slack = post_weekly_ask if (commit and schedule._slack_ready()) else None

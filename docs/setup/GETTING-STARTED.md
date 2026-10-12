@@ -10,10 +10,10 @@ a developer account, or a credit card to get value out of this on day one.
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/DataSift-Ty-Personal/SiftStack/main/install.py | python3 -
+curl -fsSL https://raw.githubusercontent.com/chsadmin1/siftstack/main/install.py | python3 -
 
 # Windows PowerShell
-irm https://raw.githubusercontent.com/DataSift-Ty-Personal/SiftStack/main/install.py | python -
+irm https://raw.githubusercontent.com/chsadmin1/siftstack/main/install.py | python -
 ```
 
 Python 3.9 or newer, standard library only. No clone, no `pip install`, no
@@ -97,7 +97,7 @@ Faster and more thorough, and every one of them has a no-API alternative.
 Copy the example and fill in only what you want. Everything is optional.
 
 ```bash
-curl -fsSL -o .env.skills.example https://raw.githubusercontent.com/DataSift-Ty-Personal/SiftStack/main/.env.skills.example
+curl -fsSL -o .env.skills.example https://raw.githubusercontent.com/chsadmin1/siftstack/main/.env.skills.example
 cp .env.skills.example .env
 ```
 

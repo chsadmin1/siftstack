@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "docs" / "agents.json"
 OUT = ROOT / "docs" / "agent-system.html"
 
-REPO = "DataSift-Ty-Personal/SiftStack"
+REPO = "chsadmin1/siftstack"
 RAW = f"https://raw.githubusercontent.com/{REPO}/main"
 INSTALL = f"curl -fsSL {RAW}/install.py | python3 -"
 

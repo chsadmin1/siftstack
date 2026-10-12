@@ -17,6 +17,7 @@ OUTPUT_DIR = Path(os.getenv("SIFTSTACK_OUTPUT_DIR", "output")) / "p1_manager"
 WEEKLY_STATE_FILE = STATE_DIR / "weekly_state.json"
 MONTHLY_SNAPSHOTS_FILE = STATE_DIR / "monthly_snapshots.json"
 PENDING_ASKS_FILE = STATE_DIR / "pending_slack_asks.json"
+ENRICH_STATE_FILE = STATE_DIR / "enrich_state.json"
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -69,6 +70,16 @@ def preset_count_history() -> list[dict]:
             out.append({"county": county_key, "month": s.get("month"),
                         "total_presets": s.get("total_presets")})
     return out
+
+
+# ---- phone enrichment: which DataSift lists have been handled (enrich.py) ----
+
+def load_enrich_state() -> dict:
+    return _load(ENRICH_STATE_FILE, {})
+
+
+def save_enrich_state(data: dict) -> None:
+    _save(ENRICH_STATE_FILE, data)
 
 
 # ---- pending Slack asks: thread_ts -> the batch waiting on a reply ----

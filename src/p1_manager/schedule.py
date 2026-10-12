@@ -11,11 +11,12 @@ fixed "run"/"health" kinds ftm_schedule.py has.
     python src/p1_manager/schedule.py                 # run forever
     python src/p1_manager/schedule.py --once weekly    # run the weekly job now, then exit
     python src/p1_manager/schedule.py --once monthly   # run the monthly job now, then exit
+    python src/p1_manager/schedule.py --once enrich    # post the enrichment cost preview now
     python src/p1_manager/schedule.py --next           # print the next 5 fire times
 
 Configuration (all env vars, business-local time, never UTC -- a naive
 schedule drifts by an hour twice a year and fires at the wrong time):
-  P1_TIMEZONE            default "America/New_York"
+  P1_TIMEZONE            default "America/New_York" (CHS sets "America/Boise")
   P1_WEEKLY_AT           HH:MM (default "08:00")
   P1_WEEKLY_DAY          weekday name (default "saturday")
   P1_MONTHLY_AT          HH:MM (default "08:00")
@@ -23,6 +24,9 @@ schedule drifts by an hour twice a year and fires at the wrong time):
                          and deliberately <=28 so it exists in every month)
   P1_WEEKLY_DRY_RUN      "1" to pass commit=False to weekly.run() (default "0")
   P1_MONTHLY_DRY_RUN     "1" to pass commit=False to monthly.run() (default "0")
+  P1_ENRICH_AT           comma list of HH:MM for the phone-enrichment cost
+                         preview, Monday to Friday (default "07:00,12:00";
+                         "off" disables it). See enrich.py.
   P1_RUN_ON_BOOT         "1" to fire whichever job is soonest once at startup
   P1_JITTER_SECONDS      random 0..N delay before firing (default 0)
 
@@ -102,11 +106,14 @@ class Slot:
     mm: int
     weekday: int | None = None     # 0=Monday .. 6=Sunday, mutually exclusive with day_of_month
     day_of_month: int | None = None
+    weekdays: tuple[int, ...] | None = None  # several weekdays (the enrichment preview)
 
     def next_after(self, now: datetime) -> datetime:
         for day_offset in range(0, 35):  # covers a whole month of lookahead
             day = (now + timedelta(days=day_offset)).date()
             if self.weekday is not None and day.weekday() != self.weekday:
+                continue
+            if self.weekdays is not None and day.weekday() not in self.weekdays:
                 continue
             if self.day_of_month is not None and day.day != self.day_of_month:
                 continue
@@ -120,10 +127,16 @@ class Slot:
 def slots() -> list[Slot]:
     wh, wm = _parse_hhmm(os.getenv("P1_WEEKLY_AT", "08:00"), "P1_WEEKLY_AT")
     mh, mm = _parse_hhmm(os.getenv("P1_MONTHLY_AT", "08:00"), "P1_MONTHLY_AT")
-    return [
+    out = [
         Slot("weekly", wh, wm, weekday=_weekday_index(os.getenv("P1_WEEKLY_DAY", "saturday"))),
         Slot("monthly", mh, mm, day_of_month=_month_day()),
     ]
+    enrich_at = os.getenv("P1_ENRICH_AT", "07:00,12:00").strip()
+    if enrich_at.lower() not in ("", "off", "0", "none"):
+        for raw in enrich_at.split(","):
+            eh, em = _parse_hhmm(raw.strip(), "P1_ENRICH_AT")
+            out.append(Slot("enrich", eh, em, weekdays=(0, 1, 2, 3, 4)))
+    return out
 
 
 def _slack_ready() -> bool:
@@ -172,12 +185,29 @@ def run_monthly() -> None:
         logger.exception("Monthly job raised, scheduler continuing")
 
 
-RUNNERS = {"weekly": run_weekly, "monthly": run_monthly}
+def run_enrich() -> None:
+    """Post the phone-enrichment cost preview (enrich.py). Spends nothing:
+    scoring only happens when someone replies "approve" in the thread."""
+    if not _slack_ready():
+        logger.warning("SLACK_* not all set -- enrichment preview skipped (it needs Slack "
+                       "for the approval reply).")
+        return
+    started = time.time()
+    try:
+        import enrich
+        import slack_app
+        result = enrich.run_preview(slack_app.post_to_channel)
+        logger.info("Enrichment preview finished in %.0fs: %s", time.time() - started, result)
+    except Exception:
+        logger.exception("Enrichment preview raised, scheduler continuing")
+
+
+RUNNERS = {"weekly": run_weekly, "monthly": run_monthly, "enrich": run_enrich}
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="P1 List Manager scheduler")
-    p.add_argument("--once", choices=["weekly", "monthly"],
+    p.add_argument("--once", choices=["weekly", "monthly", "enrich"],
                    help="Run one job immediately, then exit")
     p.add_argument("--next", action="store_true", help="Print the next 5 fire times and exit")
     p.add_argument("--verbose", "-v", action="store_true")
@@ -195,6 +225,7 @@ def main(argv=None) -> int:
                 os.getenv("P1_TIMEZONE", "America/New_York"),
                 ", ".join(f"{s.name}={s.hh:02d}:{s.mm:02d}"
                          f"{' ' + _WEEKDAYS[s.weekday][:3] if s.weekday is not None else ''}"
+                         f"{' Mon-Fri' if s.weekdays is not None else ''}"
                          f"{' day' + str(s.day_of_month) if s.day_of_month is not None else ''}"
                          for s in the_slots))
 

@@ -13,6 +13,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Weekly** (Saturdays): finds records newly added to existing P1 presets during the past week, tags them, and posts a Slack digest asking whether/where they should be pushed onto a SiftLine board + phase.
 - **Monthly** (the 28th): re-checks the County List Playbook for newly-qualifying P1 combinations, creates new presets for them, fully re-pulls every P1 preset's records, tags everything, exports a CSV, and posts a month-over-month change report.
 - Every record pulled gets three tags: a bare `P1`, a `Last Pulled MM-DD-YYYY`, and a composite `P1 | MMYY | <List Name>` traceability tag.
+- **Phone enrichment** (weekdays 7 AM and 12 PM Mountain, `src/p1_manager/enrich.py`): finds DataSift lists created since the watcher started, posts a Trestle cost preview to the P1 channel, and only scores when someone replies `approve` in that thread (`skip` passes). Each record gets its best tier as a tag (`Dial First` .. `Drop`) via the safe bulk tag call, then the quality gate (70% with phones, 18+ Dial First/Second) is reported in the thread. Records with no phones are counted, not skip traced. `POST /trigger/enrich?secret=...&only=List A|List B` re-previews specific lists. This replaced the GitHub Actions job in the old `dan525homes/creativehomesolutions` repo.
+
+All schedules run on `P1_TIMEZONE = America/Boise` (Mountain).
 
 Deployed as the Fly.io app `chs-p1-manager` (`fly.chs-p1-manager.toml`), driven by `src/p1_manager/schedule.py` inside the always-on container. A Slack App (bot token + signing secret) handles the weekly ask / reply loop; see `deploy/sync_p1_manager_secrets.py` for the required environment variables.
 
