@@ -115,6 +115,19 @@ def test_smrtphone_call_log_poll_is_off():
     assert called == []
 
 
+def test_call_outcome_variants_are_dispositions():
+    base = {"data": {"callid": "368131317", "disposition": "Correct Number", "phone": "+12085559999",
+                     "callDetails": {"callid": "uuid-1", "disposition": "Correct Number"}}}
+    for hook in ("disposition", "calloutcome", None):
+        raw = json.loads(json.dumps(base))
+        if hook:
+            raw["data"]["hookevent"] = hook
+        ev = kixie.normalize_webhook(raw)
+        assert ev["event"] == "kixie:disposition", (hook, ev["event"])
+        assert ev["callId"] == "uuid-1"  # the UUID that End Call also uses
+        assert ev["disposition"] == "Correct Number"
+
+
 def test_call_log_window_excludes_other_days():
     assert call_log.calls_between("2000-01-01T00:00:00", "2000-01-02T00:00:00") == []
 
