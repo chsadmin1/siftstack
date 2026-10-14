@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from . import config, smrtphone
+from . import config, kixie, smrtphone
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,10 @@ def _session():
 
 def available() -> dict:
     """What each transport reports about itself. Surfaced by `doctor`."""
+    if config.PROVIDER == "kixie":
+        ok, detail = kixie.check_auth()
+        return {"configured": "kixie", "api": {"ok": ok, "detail": detail},
+                "session": {"ok": False, "detail": "no browser path for Kixie"}}
     api_ok, api_detail = smrtphone.check_auth()
     try:
         sess_ok, sess_detail = _session().check_session()
@@ -52,6 +56,11 @@ def available() -> dict:
 def send(to: str, body: str, from_number: str = ""):
     """Send one message on the configured transport."""
     mode = config.TRANSPORT
+
+    # Kixie has one transport, its API. The browser fallback below drives
+    # smrtPhone's web app and would be wrong on any other provider.
+    if config.PROVIDER == "kixie":
+        return kixie.send_sms(to, body, from_number)
 
     if mode == "session":
         return _session().send_sms(to, body, from_number)
@@ -79,6 +88,10 @@ def supports_number_pool() -> bool:
     ID. Sticky senders and per-number caps are meaningless there, and saying so
     is better than pretending the pool is being used.
     """
+    if config.PROVIDER == "kixie":
+        # Single-sender mode texts from the agent user's own number; only Team
+        # SMS can pick a FROM number per message.
+        return bool(config.KIXIE_TEAM_SMS_ID)
     if config.TRANSPORT == "session":
         return False
     if config.TRANSPORT == "api":

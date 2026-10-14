@@ -1,0 +1,93 @@
+name: Deploy CHS SMS agent
+
+# Bootstrap + deploy of chs-sms-agent -- Creative Home Solutions' two-way SMS
+# agent, texting through Kixie. Runs on GitHub's infrastructure for the same
+# reason as deploy-chs-p1-manager.yml: local flyctl cannot reliably reach
+# Fly's API from the office machine. App and volume creation no-op once they
+# exist, so this is also the ongoing redeploy path.
+#
+# Every credential comes from a GitHub repo secret, never a dispatch input
+# (inputs are not masked in the run log). Secrets that are not set yet are
+# simply skipped, so the agent can go out in dry run before Kixie has switched
+# on API access; `config.missing()` logs whatever is still absent at startup.
+#
+# Required repo secrets: FLY_API_TOKEN, DATASIFT_EMAIL, DATASIFT_PASSWORD,
+# SMS_AGENT_WEBHOOK_SECRET.
+# Optional until go-live: ANTHROPIC_API_KEY, KIXIE_API_KEY, KIXIE_BUSINESS_ID,
+# KIXIE_AGENT_EMAIL, REISIFT_API_KEY, SLACK_WEBHOOK_URL, SMS_AGENT_NUMBERS.
+
+on:
+  workflow_dispatch:
+    inputs:
+      org_slug:
+        description: "Fly org slug under the Creative Home Solutions account (only used if the app doesn't exist yet)"
+        required: true
+        type: string
+
+concurrency:
+  group: chs-sms-agent-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create app (first run only)
+        run: flyctl apps create chs-sms-agent -o "$ORG_SLUG" || echo "app already exists, continuing"
+        env:
+          ORG_SLUG: ${{ inputs.org_slug }}
+
+      - name: Create volume (first run only)
+        run: |
+          if flyctl volumes list -a chs-sms-agent --json | grep -q '"Name": *"sms_agent_data"'; then
+            echo "volume already exists, continuing"
+          else
+            flyctl volumes create sms_agent_data -a chs-sms-agent --region iad --size 1 -y
+          fi
+
+      - name: Push secrets
+        env:
+          DATASIFT_EMAIL: ${{ secrets.DATASIFT_EMAIL }}
+          DATASIFT_PASSWORD: ${{ secrets.DATASIFT_PASSWORD }}
+          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KIXIE_API_KEY: ${{ secrets.KIXIE_API_KEY }}
+          KIXIE_BUSINESS_ID: ${{ secrets.KIXIE_BUSINESS_ID }}
+          KIXIE_AGENT_EMAIL: ${{ secrets.KIXIE_AGENT_EMAIL }}
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS }}
+        run: |
+          set -e
+          for req in DATASIFT_EMAIL DATASIFT_PASSWORD SMS_AGENT_WEBHOOK_SECRET; do
+            if [ -z "${!req}" ]; then
+              echo "::error::$req is not set as a GitHub secret (Settings > Secrets and variables > Actions)."
+              exit 1
+            fi
+          done
+          ARGS=()
+          add() { if [ -n "${!1}" ]; then ARGS+=("$2=${!1}"); else echo "skipping $2 (secret not set yet)"; fi; }
+          add DATASIFT_EMAIL DATASIFT_EMAIL
+          add DATASIFT_PASSWORD DATASIFT_PASSWORD
+          add SMS_AGENT_WEBHOOK_SECRET SMS_AGENT_WEBHOOK_SECRET
+          add ANTHROPIC_API_KEY ANTHROPIC_API_KEY
+          add KIXIE_API_KEY KIXIE_API_KEY
+          add KIXIE_BUSINESS_ID KIXIE_BUSINESS_ID
+          # The Kixie user the agent texts as (Nick). Kixie sends from that
+          # user's Outbound SMS Number.
+          add KIXIE_AGENT_EMAIL KIXIE_AGENT_EMAIL
+          add REISIFT_API_KEY REISIFT_API_KEY
+          add SLACK_WEBHOOK_URL SMS_AGENT_SLACK_WEBHOOK
+          # Sending pool as JSON, e.g. {"Nick": ["+12085550100"]}.
+          add SMS_AGENT_NUMBERS SMS_AGENT_NUMBERS
+          flyctl secrets set -a chs-sms-agent --stage "${ARGS[@]}"
+
+      - name: Deploy to Fly
+        run: flyctl deploy --remote-only -c fly.chs-sms-agent.toml -a chs-sms-agent

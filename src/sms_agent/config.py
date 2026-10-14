@@ -66,12 +66,32 @@ SMRTPHONE_BASE = _env("SMRTPHONE_BASE", "https://phone.smrt.studio")
 SMRTPHONE_STATE_FILE = _env("SMRTPHONE_STATE_FILE", str(ROOT / "smrtphone_state.json"))
 SESSION_HEADLESS = _env("SMS_AGENT_SESSION_HEADLESS", "1") not in ("0", "false", "False")
 # Admin > Phone Numbers. JSON array of E.164 strings, or a path to a JSON file.
-SMRTPHONE_NUMBERS_RAW = _env("SMRTPHONE_NUMBERS", "")
+# SMS_AGENT_NUMBERS is the provider-neutral spelling (the Kixie deployment
+# uses it); SMRTPHONE_NUMBERS still works and wins nothing over it.
+SMRTPHONE_NUMBERS_RAW = _env("SMS_AGENT_NUMBERS") or _env("SMRTPHONE_NUMBERS", "")
 NUMBERS_FILE = Path(
     _env("SMRTPHONE_NUMBERS_FILE")
     or _env("SMS_AGENT_NUMBERS_FILE")
     or str(ROOT / "config" / "sms_numbers.json")
 )
+
+# ---------------------------------------------------------------- provider
+# Which phone system carries the texts. 525 Homes runs smrtPhone; the Creative
+# Home Solutions deployment (2026-10) runs Kixie. See kixie.py for what the
+# Kixie API does and does not offer.
+PROVIDER = _env("SMS_AGENT_PROVIDER", "smrtphone").lower()  # smrtphone | kixie
+# Manage > Account Settings > Edit All > Integrations. API access has to be
+# switched on by Kixie support, on the Professional tier or above.
+KIXIE_API_KEY = _env("KIXIE_API_KEY", "")
+KIXIE_BUSINESS_ID = _env("KIXIE_BUSINESS_ID", "")
+# The Kixie USER the agent texts as (eventname "sms"). Kixie sends from that
+# user's Outbound SMS Number, so a callback rings the same person the text is
+# signed by. A real address, so it arrives as a Fly secret (this repo is public).
+KIXIE_AGENT_EMAIL = _env("KIXIE_AGENT_EMAIL", "")
+# Optional Team SMS id (Manage > Numbers > Team SMS). When set, sends use
+# eventname "bizsms" with a per-message fromNumber, which is what a pool of
+# several numbers needs. Without it every text leaves from the agent's number.
+KIXIE_TEAM_SMS_ID = _env("KIXIE_TEAM_SMS_ID", "")
 
 # ---------------------------------------------------------------- reisift
 DEALROOM_API = Path(
@@ -332,12 +352,18 @@ ESCALATE_INTENTS = [
 # copies: a volume entry always wins, a name only the repo knows still resolves.
 # Without this a mapping fixed in git never reached production unless someone
 # could also edit /data by hand, and flyctl from the office box often cannot.
-BUNDLED_CONFIG = ROOT / "config"
+#
+# A second deployment for another business (Creative Home Solutions, 2026-10)
+# must NOT inherit this team's Slack ids from the image, so the bundled layer
+# can be switched off with SMS_AGENT_BUNDLED_CONFIG=off (or pointed elsewhere).
+_BUNDLED = _env("SMS_AGENT_BUNDLED_CONFIG", str(ROOT / "config"))
+BUNDLED_CONFIG = Path(_BUNDLED) if _BUNDLED.lower() not in ("", "off", "none", "0") else None
 
 
 def _merged_map(live: Path, bundled_name: str) -> dict:
     merged: dict = {}
-    for path in (BUNDLED_CONFIG / bundled_name, live):
+    layers = ([BUNDLED_CONFIG / bundled_name] if BUNDLED_CONFIG else []) + [live]
+    for path in layers:
         try:
             data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except (OSError, json.JSONDecodeError):
@@ -429,15 +455,26 @@ def missing() -> list[str]:
     gaps = []
     if not WEBHOOK_SECRET:
         gaps.append("SMS_AGENT_WEBHOOK_SECRET (receiver would accept anonymous posts)")
-    if not SMRTPHONE_API_KEY:
+    if PROVIDER == "kixie":
+        if not KIXIE_API_KEY or not KIXIE_BUSINESS_ID:
+            gaps.append("KIXIE_API_KEY / KIXIE_BUSINESS_ID (cannot send replies)")
+        if not KIXIE_AGENT_EMAIL and not KIXIE_TEAM_SMS_ID:
+            gaps.append("KIXIE_AGENT_EMAIL or KIXIE_TEAM_SMS_ID (Kixie has no sender to text as)")
+        if not ANTHROPIC_API_KEY:
+            gaps.append("ANTHROPIC_API_KEY (replies fall back to keyword matching)")
+    elif not SMRTPHONE_API_KEY:
         gaps.append("SMRTPHONE_API_KEY (cannot send replies)")
     if not numbers():
-        gaps.append("SMRTPHONE_NUMBERS / config/sms_numbers.json (no sending pool)")
+        # Even on Kixie's single-sender mode the pool must name the agent's
+        # number: it carries the per-number cap, pacing and sticky sender.
+        gaps.append("SMS_AGENT_NUMBERS / config/sms_numbers.json (no sending pool)")
     if PHASE >= 3 and not ANTHROPIC_API_KEY:
         gaps.append("ANTHROPIC_API_KEY (cannot generate replies)")
     if PHASE >= 2 and not SLACK_WEBHOOK_URL:
         gaps.append("SMS_AGENT_SLACK_WEBHOOK (cannot escalate to the prospector channel)")
-    if VM_FOLLOWUP_ENABLED and not Path(SMRTPHONE_STATE_FILE).exists():
+    if VM_FOLLOWUP_ENABLED and PROVIDER == "kixie":
+        gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone's call log; it does nothing on Kixie")
+    elif VM_FOLLOWUP_ENABLED and not Path(SMRTPHONE_STATE_FILE).exists():
         gaps.append(
             f"SMRTPHONE_STATE_FILE ({SMRTPHONE_STATE_FILE}) does not exist; voicemail "
             "follow-up (and the SMS-log reconcile backstop) both read the call/SMS "
