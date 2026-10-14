@@ -20,7 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 _tmp = tempfile.mkdtemp()
 os.environ["SMS_AGENT_DB"] = str(Path(_tmp) / "agent.db")
 os.environ["SMS_AGENT_DATA_DIR"] = _tmp
-os.environ["SMS_AGENT_PROVIDER"] = "kixie"
+# CHS texts through smrtPhone and calls through Kixie (fly.chs-sms-agent.toml).
+os.environ["SMS_AGENT_PROVIDER"] = "smrtphone"
+os.environ["SMS_AGENT_CALL_LOG_POLL"] = "0"
+os.environ["SMS_AGENT_PHASE"] = "1"
 os.environ["SMS_AGENT_REP_NUMBERS"] = json.dumps({"+12085550100": "Nick"})
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
@@ -74,6 +77,42 @@ def test_call_log_from_endcall_webhook():
     assert c["from_num"] == "+12085550100" and c["to_num"] == "+12085559999"
     assert c["contact_name"] == "Jane Seller"
     assert c["disposition"] == "Correct Number"  # the later disposition webhook wins
+
+
+def test_kixie_call_pauses_smrtphone_text_thread():
+    """The split setup's key guarantee: a rep's real Kixie call stops the
+    smrtPhone texting thread with that seller."""
+    from src.sms_agent import config, engine
+    assert config.PROVIDER == "smrtphone"
+    store.init()
+    store.ensure_conversation("2085557777")
+    raw = json.loads(json.dumps(ENDCALL))
+    raw["customernumber"] = "+12085557777"
+    raw["data"]["callDetails"].update(callid="call-777", tonumber="+12085557777", duration=95)
+    out = engine.process("kixie", kixie.normalize_webhook(raw))
+    assert out.get("action") == "call_takeover", out
+    assert store.get_conversation("2085557777")["state"] == "paused"
+
+
+def test_smrtphone_call_log_poll_is_off():
+    """Calls never appear in smrtPhone's log here, so the worker must not poll it."""
+    from src.sms_agent import config, worker
+    assert config.CALL_LOG_POLL is False
+    import src.sms_agent.call_takeover as ct
+    called = []
+    orig_ct, orig_rc = ct.run, None
+    ct.run = lambda **k: called.append(k) or {}
+    import src.sms_agent.reconcile as rc
+    orig_rc = rc.run
+    rc.run = lambda **k: {}
+    old_interval = config.RECONCILE_INTERVAL
+    config.RECONCILE_INTERVAL = 1
+    worker._last_reconcile = 0.0
+    try:
+        worker.run_once(with_reconcile=True)
+    finally:
+        ct.run, rc.run, config.RECONCILE_INTERVAL = orig_ct, orig_rc, old_interval
+    assert called == []
 
 
 def test_call_log_window_excludes_other_days():
