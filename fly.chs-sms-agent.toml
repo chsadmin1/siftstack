@@ -1,8 +1,19 @@
 # fly.toml for Creative Home Solutions' own instance of the two-way SMS agent.
 #
 # Its own Fly app on CHS's Fly.io account, with CHS's DataSift account, Slack
-# channel and Anthropic key, texting through Kixie (SMS_AGENT_PROVIDER=kixie)
-# rather than smrtPhone, which the upstream SiftStack agent was built on.
+# channel and Anthropic key.
+#
+# SPLIT PHONE SYSTEMS (Dan, 2026-10-14): CHS TEXTS through smrtPhone and
+# CALLS through Kixie.
+#   * Texting: SMS_AGENT_PROVIDER=smrtphone. Sends use smrtPhone's API, and
+#     smrtPhone's SMS webhooks go to POST /hooks/{secret}/smrtphone.
+#   * Calling: Kixie's End Call (and Call Disposition) webhooks go to
+#     POST /hooks/{secret}/kixie. engine.handle_call_ended pauses the texting
+#     thread when a rep has a real call with that seller, whichever provider
+#     sends the texts, and the call coaching job reads the same events
+#     (src/sms_agent/call_log.py). Kixie's SMS webhook is NOT used.
+#   * SMS_AGENT_CALL_LOG_POLL=0: smrtPhone's call log is empty for this team,
+#     so the smrtPhone call-takeover poll is off and Kixie's webhook does it.
 #
 # Market is Ada + Canyon counties, Idaho (Boise area), so every clock here is
 # Mountain time. The code defaults are Eastern and would text Idaho sellers
@@ -10,15 +21,16 @@
 #
 # Starts in DRY RUN on purpose: the agent builds the day's batch, classifies
 # replies and logs what it WOULD send, but sends nothing and writes nothing to
-# DataSift. Flip SMS_AGENT_DRY_RUN to '0' only after Kixie API access is live
-# and a watched canary send to a team phone has round-tripped (send, reply,
-# reply shows up in the logs). Set it HERE, never as a Fly secret: a Fly
-# secret silently overrides anything in this [env] block.
+# DataSift. Flip SMS_AGENT_DRY_RUN to '0' only after smrtPhone's A2P 10DLC
+# registration is approved and a watched canary send to a team phone has
+# round-tripped (send, reply, reply shows up in the logs). Set it HERE, never
+# as a Fly secret: a Fly secret silently overrides anything in this [env] block.
 #
 # Secrets (pushed by .github/workflows/deploy-chs-sms-agent.yml, never here):
-# ANTHROPIC_API_KEY, KIXIE_API_KEY, KIXIE_BUSINESS_ID, KIXIE_AGENT_EMAIL,
-# REISIFT_API_KEY, DATASIFT_EMAIL/PASSWORD, SMS_AGENT_SLACK_WEBHOOK,
-# SMS_AGENT_WEBHOOK_SECRET, and SMS_AGENT_NUMBERS (the sending pool).
+# ANTHROPIC_API_KEY, SMRTPHONE_API_KEY, REISIFT_API_KEY, DATASIFT_EMAIL/PASSWORD,
+# SMS_AGENT_SLACK_WEBHOOK, SMS_AGENT_WEBHOOK_SECRET, SMS_AGENT_NUMBERS (the
+# smrtPhone sending pool) and SMS_AGENT_REP_NUMBERS (Kixie number -> rep, for
+# call coaching).
 
 app = 'chs-sms-agent'
 primary_region = 'iad'
@@ -27,7 +39,7 @@ primary_region = 'iad'
   dockerfile = 'deploy/Dockerfile'
 
 [env]
-  SMS_AGENT_PROVIDER = 'kixie'
+  SMS_AGENT_PROVIDER = 'smrtphone'
   SMS_AGENT_TRANSPORT = 'api'
   # The image bundles config/slack_ids.json (placeholder ids in this repo) as a
   # fallback layer under the volume copy. Off, so only real CHS ids are used.
@@ -50,11 +62,16 @@ primary_region = 'iad'
   SMS_AGENT_CAMPAIGN_PRESET = 'Autotext'
   SMS_AGENT_CAMPAIGN_TZ = 'America/Boise'
   SMS_AGENT_BUSINESS_TZ = 'America/Boise'
-  # smrtPhone-only features. The reconcile backstop and call takeover read
-  # smrtPhone's message and call logs, and the voicemail follow-up reads its
-  # call dispositions. Kixie equivalents are phase 2 of the CHS rollout.
-  SMS_AGENT_RECONCILE_INTERVAL = '0'
+  # Calls are on Kixie, so the smrtPhone call-log poll and the voicemail
+  # follow-up (which reads smrtPhone call dispositions) have nothing to read.
+  SMS_AGENT_CALL_LOG_POLL = '0'
   SMS_AGENT_VM_FOLLOWUP = '0'
+  # The SMS-log reconcile backstop catches replies whose smrtPhone webhook was
+  # dropped, but it reads the log through a captured smrtPhone browser session
+  # (/data/smrtphone_state.json from _api/smrtphone_login.py), which this
+  # volume does not have yet. Set to '300' once that file is on the volume.
+  SMRTPHONE_STATE_FILE = '/data/smrtphone_state.json'
+  SMS_AGENT_RECONCILE_INTERVAL = '0'
   # The daily-35 picker is upstream-specific (its own caller and SiftLine boards).
   DAILY25_ENABLED = '0'
 

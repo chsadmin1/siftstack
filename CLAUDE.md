@@ -23,21 +23,20 @@ python src/p1_manager/monthly.py --dry-run    # preview this month's refresh, no
 
 Deployment is via GitHub Actions (`.github/workflows/deploy-chs-p1-manager.yml`), not local `flyctl` — see that file's header comment for why.
 
-## SMS agent on Kixie (being set up, 2026-10)
+## SMS agent: texts through smrtPhone, calls through Kixie (being set up, 2026-10)
 
 `src/sms_agent/` (the two-way texting agent: outreach from the `Autotext` preset, reply classification, opt-outs, hot-lead handoff to Slack) is being brought up for this account as the Fly app `chs-sms-agent` (`fly.chs-sms-agent.toml`, deployed by `.github/workflows/deploy-chs-sms-agent.yml`). It starts in `SMS_AGENT_DRY_RUN=1`, on Mountain time (`America/Boise`), signing texts as Nick. Full agent docs: `src/sms_agent/README.md`.
 
-The upstream agent was built on smrtPhone; this account uses **Kixie**, selected by `SMS_AGENT_PROVIDER=kixie` (`src/sms_agent/kixie.py`). `kixie.normalize_webhook` rewrites Kixie's SMS and `endcall` webhooks into the event shape the engine already speaks, so nothing downstream is vendor-specific. Kixie webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/kixie` (Kixie: Manage > Automations > Webhooks; add SMS with direction "all", and End Call).
+**Split phone systems (Dan, 2026-10-14): everything about TEXTING goes through smrtPhone; everything about CALLS (call reviews, call takeover) goes through Kixie.**
+- **Texting:** `SMS_AGENT_PROVIDER=smrtphone`, the provider the upstream agent was built on. Sends use smrtPhone's API (`SMRTPHONE_API_KEY`); smrtPhone's SMS webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/smrtphone`. No text sends until smrtPhone's A2P 10DLC registration is approved.
+- **Calling:** Kixie's End Call (and Call Disposition) webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/kixie` (Kixie: Manage > Automations > Webhooks). `kixie.normalize_webhook` turns them into `callEnded` events, and `engine.handle_call_ended` pauses the texting thread when a rep has a real call with that seller, regardless of provider. The same stored events feed call coaching (`src/sms_agent/call_log.py`). Kixie's SMS webhook is not used.
+- `SMS_AGENT_CALL_LOG_POLL=0` turns off the smrtPhone call-log takeover poll (calls are not in smrtPhone), and `SMS_AGENT_VM_FOLLOWUP=0` for the same reason.
+- `SMS_AGENT_RECONCILE_INTERVAL=0` until a captured smrtPhone browser session (`/data/smrtphone_state.json`) is on the volume; that backstop re-reads smrtPhone's SMS log for replies whose webhook was dropped. Set it to `300` once the file is there.
+- The Kixie SMS provider (`kixie.py` send path) stays in the code but is not selected here.
 
-What Kixie's API does not have, and how the agent copes:
-- **No per-message FROM number** in single-sender mode: texts leave from the Kixie user named by `KIXIE_AGENT_EMAIL`, who must have an Outbound SMS Number. `KIXIE_TEAM_SMS_ID` switches to Team SMS, which can pick a number.
-- **No delivery-status webhook, no message-history API, no do-not-text API, no payload signature.** The smrtPhone reconcile and call-log sweep are skipped on Kixie; call takeover comes from the `endcall` webhook instead; opt-outs are suppressed locally and Slack-alerted for manual entry in Kixie.
-- The send response body is undocumented; a 2xx counts as sent unless the body reports failure, and the raw body is logged so the first live send shows the real shape.
-- API access needs the Professional tier and Kixie support switching it on, and **no text sends until A2P 10DLC is approved** through Kixie.
+DataSift's own smrtPhone integration logs texts and replies to each record's activity; watch for a double count of `sms_attempts` on the first live send.
 
-DataSift's own Kixie integration (Settings > Integrations > Kixie, set up by Kixie's team) complements this: it logs the agent's texts and replies to each record's activity log and 1:1 SMS view, and updates phone statuses from call outcomes. Watch for a double count on the first live send, since both the agent and that integration may increment `sms_attempts`.
-
-`python src/sms_agent/cli.py selftest` runs 289 zero-network checks (section 13 is Kixie); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.
+`python src/sms_agent/cli.py selftest` runs 289 zero-network checks (section 13 covers the Kixie webhooks); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.
 
 ## Call coaching and KPI digest (GitHub Actions, 2026-10)
 

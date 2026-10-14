@@ -430,17 +430,19 @@ def run_once(with_reconcile: bool = True) -> dict:
             # emits no SMS event at all. Same cadence, same session, same
             # failure mode if it is missing: an automated text landing hours
             # after a rep already had the conversation.
-            try:
-                from . import call_takeover
+            # Skipped when calls go through another dialer (config.CALL_LOG_POLL).
+            if config.CALL_LOG_POLL:
+                try:
+                    from . import call_takeover
 
-                calls = call_takeover.run(pages=1, hours=6)
-                if calls.get("paused"):
-                    log.info("call takeover paused %s thread(s)", calls["paused"])
-                    result["call_takeovers"] = calls["paused"]
-                elif calls.get("error"):
-                    log.warning("call takeover failed: %s", calls["error"])
-            except Exception:  # noqa: BLE001 - never let the backstop stop the loop
-                log.exception("call takeover pass failed")
+                    calls = call_takeover.run(pages=1, hours=6)
+                    if calls.get("paused"):
+                        log.info("call takeover paused %s thread(s)", calls["paused"])
+                        result["call_takeovers"] = calls["paused"]
+                    elif calls.get("error"):
+                        log.warning("call takeover failed: %s", calls["error"])
+                except Exception:  # noqa: BLE001 - never let the backstop stop the loop
+                    log.exception("call takeover pass failed")
     return result
 
 

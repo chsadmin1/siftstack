@@ -142,6 +142,12 @@ AUTHORSHIP_WINDOW_MINUTES = int(_env("SMS_AGENT_AUTHORSHIP_WINDOW", "10"))
 # A call shorter than this is a voicemail or a wrong number, not a human taking
 # over the conversation. Same threshold the call coaching pipeline already uses.
 CALL_TAKEOVER_MIN_SECONDS = int(_env("SMS_AGENT_CALL_TAKEOVER_SECONDS", "60"))
+# Poll smrtPhone's CALL log for takeovers (call_takeover.py). Off when the team
+# dials from another system: CHS texts through smrtPhone but calls through
+# Kixie, so its calls never appear in smrtPhone's log and takeover comes from
+# Kixie's endcall webhook instead (engine.handle_call_ended), which works
+# whatever SMS_AGENT_PROVIDER is.
+CALL_LOG_POLL = _env("SMS_AGENT_CALL_LOG_POLL", "1") not in ("0", "false", "no")
 # Recipient-local send window. A bot texting at 11pm is both a compliance
 # problem and the clearest tell that it is a bot.
 QUIET_START_HOUR = int(_env("SMS_AGENT_QUIET_START", "8"))
@@ -472,7 +478,10 @@ def missing() -> list[str]:
         gaps.append("ANTHROPIC_API_KEY (cannot generate replies)")
     if PHASE >= 2 and not SLACK_WEBHOOK_URL:
         gaps.append("SMS_AGENT_SLACK_WEBHOOK (cannot escalate to the prospector channel)")
-    if VM_FOLLOWUP_ENABLED and PROVIDER == "kixie":
+    if VM_FOLLOWUP_ENABLED and not CALL_LOG_POLL:
+        gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone call dispositions, and "
+                    "SMS_AGENT_CALL_LOG_POLL says calls happen in another dialer")
+    elif VM_FOLLOWUP_ENABLED and PROVIDER == "kixie":
         gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone's call log; it does nothing on Kixie")
     elif VM_FOLLOWUP_ENABLED and not Path(SMRTPHONE_STATE_FILE).exists():
         gaps.append(

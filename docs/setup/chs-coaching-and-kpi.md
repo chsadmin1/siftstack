@@ -29,7 +29,7 @@ Kixie > Manage > Automations > Webhooks > add **End Call** pointing at:
 https://chs-sms-agent.fly.dev/hooks/<SMS_AGENT_WEBHOOK_SECRET>/kixie
 ```
 
-This is the same URL as the SMS webhook. Also add **Call Disposition** to the same URL if you want reps' dispositions on the sheet. Call recording must be on for every rep in Kixie.
+Kixie is only used for calls; texting runs through smrtPhone, so do not add Kixie's SMS webhook. Also add **Call Disposition** to the same URL if you want reps' dispositions on the sheet. Call recording must be on for every rep in Kixie. The same End Call webhook also pauses the AI texting thread when a rep has a real call with a seller.
 
 ### 2. Redeploy chs-sms-agent
 
