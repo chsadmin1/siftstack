@@ -1,0 +1,19 @@
+name: Fetch SMS agent logs
+
+# Recent logs from chs-sms-agent, read through GitHub's runners because local
+# flyctl cannot reach Fly from the office machine. Useful before go-live:
+# in dry run the worker logs every text it WOULD have sent ("DRY_RUN send").
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Recent logs
+        run: flyctl logs -a chs-sms-agent --no-tail
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

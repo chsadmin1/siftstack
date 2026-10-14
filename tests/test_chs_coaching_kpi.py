@@ -24,6 +24,7 @@ os.environ["SMS_AGENT_DATA_DIR"] = _tmp
 os.environ["SMS_AGENT_PROVIDER"] = "smrtphone"
 os.environ["SMS_AGENT_CALL_LOG_POLL"] = "0"
 os.environ["SMS_AGENT_PHASE"] = "1"
+os.environ["SMS_AGENT_NUMBERS"] = json.dumps({"Nick": ["+12085550100"]})
 os.environ["SMS_AGENT_REP_NUMBERS"] = json.dumps({"+12085550100": "Nick"})
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
@@ -126,6 +127,27 @@ def test_call_outcome_variants_are_dispositions():
         assert ev["event"] == "kixie:disposition", (hook, ev["event"])
         assert ev["callId"] == "uuid-1"  # the UUID that End Call also uses
         assert ev["disposition"] == "Correct Number"
+
+
+def test_canary_only_texts_allowlisted_team_phones():
+    from fastapi.testclient import TestClient
+
+    from src.sms_agent import config, receiver, transport
+    from src.sms_agent.smrtphone import SendResult
+    sent = []
+    old = (config.WEBHOOK_SECRET, config.CANARY_NUMBERS, transport.send, config.SENDER_NAME)
+    config.WEBHOOK_SECRET, config.CANARY_NUMBERS, config.SENDER_NAME = "s3cret", ["+12085551234"], "Nick"
+    transport.send = lambda to, body, frm="": sent.append((to, frm)) or SendResult(True, sms_id="sm1")
+    try:
+        c = TestClient(receiver.app)
+        assert c.post("/hooks/wrong/canary?to=2085551234").status_code == 404
+        assert c.post("/hooks/s3cret/canary?to=2085559999").status_code == 403  # a seller, say
+        r = c.post("/hooks/s3cret/canary?to=(208) 555-1234")
+        assert r.status_code == 200 and r.json()["ok"], r.text
+    finally:
+        config.WEBHOOK_SECRET, config.CANARY_NUMBERS, transport.send, config.SENDER_NAME = old
+    assert sent == [("2085551234", "+12085550100")], sent  # from Nick's pool number
+    assert store.get_conversation("2085551234")["from_number"] == "+12085550100"
 
 
 def test_call_log_window_excludes_other_days():

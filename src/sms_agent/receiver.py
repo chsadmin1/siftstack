@@ -12,6 +12,7 @@ Endpoints (the secret is in the path because neither vendor signs its payload):
     POST /hooks/{secret}/kixie
     POST /hooks/{secret}/datasift
     GET  /hooks/{secret}/calls?since=&until=   (Kixie call log, for coaching)
+    POST /hooks/{secret}/canary?to=<team phone>  (one go-live test text)
     GET  /health
 """
 from __future__ import annotations
@@ -183,6 +184,43 @@ def kixie_calls(secret: str, request: Request, since: str, until: str) -> Any:
     from . import call_log
 
     return {"ok": True, "calls": call_log.calls_between(since, until)}
+
+
+CANARY_TEXT = ("Test from the CHS texting system. Reply to this text with anything "
+               "to finish the test.")
+
+
+@app.post("/hooks/{secret}/canary")
+def canary(secret: str, request: Request, to: str) -> Any:
+    """Send ONE test text to a team phone, through the real provider path.
+
+    The go-live check: proves the provider key, the sending number and its
+    A2P registration, and (once the team replies) the inbound webhook, while
+    SMS_AGENT_DRY_RUN stays on for every seller. Only numbers listed in
+    SMS_AGENT_CANARY_NUMBERS can receive it.
+    """
+    if not _authorized(secret, request):
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    allowed = {store.clean_phone(n) for n in config.CANARY_NUMBERS}
+    phone = store.clean_phone(to)
+    if not phone or phone not in allowed:
+        return Response(status_code=status.HTTP_403_FORBIDDEN,
+                        content='{"ok": false, "error": "number not in SMS_AGENT_CANARY_NUMBERS"}',
+                        media_type="application/json")
+    from . import sender_pool, transport
+
+    from_number = sender_pool.assign(phone, config.SENDER_NAME)
+    if not from_number:
+        return {"ok": False, "error": "no sending number in the pool"}
+    result = transport.send(phone, CANARY_TEXT, from_number)
+    if result.ok:
+        store.ensure_conversation(phone, from_number=from_number)
+        store.add_message(phone, "out", CANARY_TEXT, from_number=from_number,
+                          sms_id=result.sms_id, author="canary")
+        store.record_send(from_number, phone)
+    log.info("canary to ...%s from %s: ok=%s %s", phone[-4:], from_number, result.ok, result.error)
+    return {"ok": result.ok, "from": from_number, "sms_id": result.sms_id,
+            "error": result.error, "status_code": result.status_code}
 
 
 @app.get("/health")
