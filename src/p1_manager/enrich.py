@@ -1,4 +1,4 @@
-"""Phone enrichment for new DataSift lists, approved from Slack.
+"""Phone enrichment for new DataSift lists: skip trace + Trestle, approved from Slack.
 
 Replaces the GitHub Actions auto-enrich job that lived in the old
 dan525homes/creativehomesolutions repo (auto-enrich.yml +
@@ -12,21 +12,32 @@ DataSift credentials and a Slack listener:
   1. PREVIEW (weekdays, P1_ENRICH_AT, default 07:00 and 12:00 Mountain):
      find lists created since the watcher started that have not been
      handled, read every record on them, skip records that already carry a
-     dial tier tag, and count the phone numbers left to score. Post the
-     cost estimate to the P1 channel and remember the batch under the
-     message's ts. Nothing is charged.
-  2. APPROVE: a reply of "approve" in that thread scores every phone with
-     Trestle, tags each record with its best tier (Dial First .. Drop) using
-     the safe bulk tag call, checks the quality gate and posts the result in
-     the thread. "skip" marks the lists handled without spending anything.
+     dial tier tag, count the phone numbers left to score and the records
+     that have never been skip traced. Post the estimate to the P1 channel
+     and remember the batch under the message's ts. Nothing is charged.
+  2. APPROVE (a reply of "approve" in that thread):
+       a. start a DataSift skip trace if any record has never been traced
+          (see SKIP TRACE below),
+       b. score every phone already on the records with Trestle and tag each
+          record with its best tier (Dial First .. Drop) via the safe bulk
+          tag call,
+       c. keep checking the skip-traced records; as their numbers land, score
+          and tag those too, and post a follow-up in the thread. Leftovers
+          are re-checked at each scheduled run for SKIPTRACE_GIVE_UP_HOURS.
+     "skip" marks the lists handled without spending anything.
 
-Records with no phone numbers are counted, not scored: they need a DataSift
-skip trace first. Run it on the list in DataSift and they are picked up the
-next time that list is sent through /trigger/enrich.
+SKIP TRACE: POST /api/internal/property/skip-trace/ IGNORES which records it
+is given and traces every untraced record in the account (measured live
+2026-08-19, see src/datasift_skiptrace.py: one uuid in, 53,322 records
+traced). That costs nothing on DataSift's unlimited skip trace plan, which
+CHS is on (stats read 2026-10-14: value_spent $0.00, saved $511.20), and
+would bill the whole account on a metered plan. So start_skip_trace() reads
+the stats first and refuses unless value_spent is 0 and the unlimited
+savings counter is positive; the preview tells the team it is account-wide.
 
 Tier tags go on the RECORD (its best phone), matching what the old job
-wrote and what the team filters on. A phone whose Trestle call fails gets
-no score, and a record whose phones all failed gets no tag, rather than a
+wrote and what the team filters on. A phone whose Trestle call fails gets no
+score, and a record whose phones all failed gets no tag, rather than a
 misleading "Drop".
 """
 from __future__ import annotations
@@ -34,8 +45,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -54,6 +66,14 @@ TIERS = [  # best first; (tag, low, high) on Trestle's 0-100 activity score
 TIER_TAGS = {t for t, _, _ in TIERS}
 TRESTLE_URL = "https://api.trestleiq.com/3.0/phone_intel"
 PRICE_PER_PHONE = float(os.getenv("TRESTLE_PRICE_PER_PHONE", "0.015"))
+# For the preview only: how many numbers a skip trace hit usually returns.
+EST_PHONES_PER_TRACE = float(os.getenv("P1_EST_PHONES_PER_TRACE", "3"))
+
+SKIPTRACE_STATS = "/api/internal/activity/skiptrace/stats/"
+SKIPTRACE_RUN = "/api/internal/property/skip-trace/"
+SKIPTRACE_POLL_MINUTES = int(os.getenv("P1_SKIPTRACE_POLL_MINUTES", "10"))
+SKIPTRACE_WATCH_MINUTES = int(os.getenv("P1_SKIPTRACE_WATCH_MINUTES", "120"))
+SKIPTRACE_GIVE_UP_HOURS = int(os.getenv("P1_SKIPTRACE_GIVE_UP_HOURS", "48"))
 
 # The quality gate from the client deliverable: a list is worth dialing when
 # most records have a phone and enough of them have a top-tier number.
@@ -64,6 +84,14 @@ APPROVE_WORDS = ("approve", "approved", "yes", "go", "run it")
 SKIP_WORDS = ("skip", "no", "cancel", "don't", "dont")
 
 _run_lock = threading.Lock()
+# The post-approval watcher and the scheduled follow-up both score skip trace
+# results; one lock plus a fresh read of the batch inside it means a record's
+# numbers are never paid for twice.
+_trace_lock = threading.Lock()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------- reading
@@ -92,9 +120,9 @@ def all_lists(client: DataSiftClient) -> list[dict]:
     return [x for x in rows if x.get("uuid")]
 
 
-def record_phones(client: DataSiftClient, uuid: str) -> tuple[list[str], set[str]]:
-    """(phones, tag names) for one record. The list search returns phones
-    empty, so each record is read on its own, as the old d9 job found."""
+def read_record(client: DataSiftClient, uuid: str) -> dict:
+    """{phones, tags, skiptraced} for one record. The list search returns
+    phones empty, so each record is read on its own, as the old d9 job found."""
     rec = client.api(f"/api/internal/property/{uuid}/")
     owners = rec.get("owners") or ([rec["owner"]] if isinstance(rec.get("owner"), dict) else [])
     phones: list[str] = []
@@ -103,11 +131,24 @@ def record_phones(client: DataSiftClient, uuid: str) -> tuple[list[str], set[str
             num = _digits(p.get("phone") or p.get("number") if isinstance(p, dict) else p)
             if num and num not in phones:
                 phones.append(num)
-    return phones, _names(rec.get("tags"))
+    return {"phones": phones, "tags": _names(rec.get("tags")),
+            "skiptraced": bool(rec.get("skiptraced"))}
+
+
+def _read_many(client: DataSiftClient, uuids: list[str]) -> dict[str, dict | None]:
+    def _one(u):
+        try:
+            return u, read_record(client, u)
+        except ApiError as e:
+            log.warning("could not read record %s: %s", u, str(e)[:120])
+            return u, None
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        return dict(ex.map(_one, uuids))
 
 
 def collect(client: DataSiftClient, lists: list[dict]) -> dict:
-    """Every record on `lists` that still needs scoring, deduped across lists."""
+    """Every record on `lists` that still needs work, deduped across lists."""
     uuids: dict[str, str] = {}  # record uuid -> first list title it was seen on
     per_list: dict[str, int] = {}
     for lst in lists:
@@ -119,38 +160,32 @@ def collect(client: DataSiftClient, lists: list[dict]) -> dict:
                 uuids.setdefault(u, lst.get("title", ""))
 
     records: dict[str, list[str]] = {}
-    already, no_phone, errors = 0, 0, 0
-
-    def _one(u):
-        try:
-            return u, record_phones(client, u)
-        except ApiError as e:
-            log.warning("could not read record %s: %s", u, str(e)[:120])
-            return u, None
-
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        for u, got in ex.map(_one, list(uuids)):
-            if got is None:
-                errors += 1
-                continue
-            phones, tags = got
-            if tags & TIER_TAGS:
-                already += 1
-            elif not phones:
-                no_phone += 1
-            else:
-                records[u] = phones
+    needs_trace: list[str] = []
+    already, no_hit, errors = 0, 0, 0
+    for u, got in _read_many(client, list(uuids)).items():
+        if got is None:
+            errors += 1
+        elif got["tags"] & TIER_TAGS:
+            already += 1
+        elif got["phones"]:
+            records[u] = got["phones"]
+        elif got["skiptraced"]:
+            no_hit += 1  # traced before and found nothing; tracing again won't help
+        else:
+            needs_trace.append(u)
 
     unique_phones = {p for ps in records.values() for p in ps}
     return {
         "records": records,
+        "needs_trace": needs_trace,
         "list_sizes": per_list,
         "total_records": len(uuids),
         "already_tiered": already,
-        "no_phone": no_phone,
+        "no_hit": no_hit,
         "read_errors": errors,
         "phones": len(unique_phones),
         "est_cost": round(len(unique_phones) * PRICE_PER_PHONE, 2),
+        "est_trace_cost": round(len(needs_trace) * EST_PHONES_PER_TRACE * PRICE_PER_PHONE, 2),
     }
 
 
@@ -161,7 +196,7 @@ def new_lists(client: DataSiftClient) -> tuple[list[dict], bool]:
     st = state.load_enrich_state()
     lists = all_lists(client)
     if not st.get("baseline_set"):
-        st["baseline_set"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        st["baseline_set"] = _now()
         st.setdefault("handled", {})
         for lst in lists:
             st["handled"][lst["uuid"]] = {"title": lst.get("title"), "status": "baseline"}
@@ -177,9 +212,8 @@ def new_lists(client: DataSiftClient) -> tuple[list[dict], bool]:
 def _mark(list_uuids: list[str], titles: dict[str, str], status: str) -> None:
     st = state.load_enrich_state()
     handled = st.setdefault("handled", {})
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for u in list_uuids:
-        handled[u] = {"title": titles.get(u, ""), "status": status, "at": stamp}
+        handled[u] = {"title": titles.get(u, ""), "status": status, "at": _now()}
     state.save_enrich_state(st)
 
 
@@ -192,16 +226,22 @@ def preview_text(lists: list[dict], c: dict) -> str:
     lines.append(
         f"\n*{len(c['records'])} records* have phones to score: *{c['phones']} unique numbers*, "
         f"estimated *${c['est_cost']:.2f}* in Trestle charges (${PRICE_PER_PHONE:.3f} per number).")
+    if c["needs_trace"]:
+        lines.append(
+            f":mag: *{len(c['needs_trace'])} records have never been skip traced.* Approving also "
+            "starts a DataSift skip trace (free on your unlimited plan; DataSift runs it on every "
+            "untraced record in the account, not just these lists). Their new numbers are scored "
+            f"as they arrive, roughly *${c['est_trace_cost']:.2f}* more.")
     if c["already_tiered"]:
         lines.append(f"{c['already_tiered']} records already have a dial tier and are skipped.")
-    if c["no_phone"]:
-        lines.append(f":warning: {c['no_phone']} records have no phone numbers. Skip trace them in "
-                     "DataSift first; they are not part of this charge.")
+    if c["no_hit"]:
+        lines.append(f"{c['no_hit']} records were skip traced before with no phones found; "
+                     "they need deep prospecting rather than another trace.")
     if c["read_errors"]:
         lines.append(f"{c['read_errors']} records could not be read and are left out.")
-    if c["records"]:
-        lines.append("\nReply *approve* in this thread to score and tag them, or *skip* to "
-                     "pass on these lists. Nothing is charged until someone approves.")
+    if c["records"] or c["needs_trace"]:
+        lines.append("\nReply *approve* in this thread to run it, or *skip* to pass on these "
+                     "lists. Nothing is charged or traced until someone approves.")
     return "\n".join(lines)
 
 
@@ -210,7 +250,7 @@ def run_preview(post, client: DataSiftClient | None = None,
     """The scheduled step. `post(text) -> ts or None` sends to the P1 channel.
 
     only_titles: preview exactly these lists (by title), whether or not they
-    were handled before. The manual way to re-run a list after a skip trace."""
+    were handled before. The manual way to re-run a list."""
     client = client or DataSiftClient.from_env()
     if only_titles:
         wanted = {t.strip().lower() for t in only_titles}
@@ -233,7 +273,7 @@ def run_preview(post, client: DataSiftClient | None = None,
 
     c = collect(client, lists)
     titles = {x["uuid"]: x.get("title", "") for x in lists}
-    if not c["records"]:
+    if not c["records"] and not c["needs_trace"]:
         post(preview_text(lists, c))
         _mark(list(titles), titles, "nothing_to_score")
         return {"new_lists": len(lists), "phones": 0}
@@ -245,10 +285,37 @@ def run_preview(post, client: DataSiftClient | None = None,
     state.save_pending_ask(ts, {
         "kind": "enrich", "status": "pending",
         "list_uuids": list(titles), "list_titles": titles,
-        "records": c["records"], "phones": c["phones"], "est_cost": c["est_cost"],
-        "no_phone": c["no_phone"], "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "records": c["records"], "needs_trace": c["needs_trace"],
+        "phones": c["phones"], "est_cost": c["est_cost"],
+        "no_hit": c["no_hit"], "created": _now(),
     })
-    return {"new_lists": len(lists), "phones": c["phones"], "est_cost": c["est_cost"], "ts": ts}
+    return {"new_lists": len(lists), "phones": c["phones"], "est_cost": c["est_cost"],
+            "needs_trace": len(c["needs_trace"]), "ts": ts}
+
+
+# ---------------------------------------------------------------- skip trace
+
+def start_skip_trace(client: DataSiftClient) -> tuple[bool, str]:
+    """Trigger DataSift's skip trace, but only on an unlimited plan.
+
+    The endpoint is account-wide no matter what it is sent (module
+    docstring), so the plan check is what keeps this from billing every
+    record in the account."""
+    try:
+        before = client.api(SKIPTRACE_STATS)
+    except ApiError as e:
+        return False, f"could not read skip trace stats ({str(e)[:120]})"
+    spent = float(before.get("value_spent") or 0)
+    saved = float(before.get("saved_by_unlimited_skiptracing") or 0)
+    if spent > 0 or saved <= 0:
+        return False, (f"the DataSift plan no longer looks unlimited (spent ${spent:,.2f}, "
+                       f"unlimited savings ${saved:,.2f}), and this API would trace and bill "
+                       "the whole account. Skip trace these lists from the DataSift app instead.")
+    try:
+        client.api(SKIPTRACE_RUN, "POST", {})
+    except ApiError as e:
+        return False, f"DataSift refused the skip trace ({str(e)[:120]})"
+    return True, "started"
 
 
 # ---------------------------------------------------------------- scoring
@@ -292,6 +359,15 @@ def score_records(records: dict[str, list[str]], api_key: str) -> tuple[dict[str
     return tiers, {"scored": len(unique) - failed, "failed": failed}
 
 
+def _tag(client: DataSiftClient, tiers: dict[str, str]) -> dict[str, int]:
+    by_tier: dict[str, list[str]] = {}
+    for uuid, tier in tiers.items():
+        by_tier.setdefault(tier, []).append(uuid)
+    for tier, uuids in by_tier.items():
+        client.bulk_add_tags(uuids, [tier])
+    return {t: len(by_tier.get(t, [])) for t, _, _ in TIERS}
+
+
 def gate(tiers: dict[str, str], total_with_phones: int, no_phone: int) -> dict:
     total = total_with_phones + no_phone
     coverage = total_with_phones / total if total else 0.0
@@ -300,39 +376,155 @@ def gate(tiers: dict[str, str], total_with_phones: int, no_phone: int) -> dict:
             "passed": coverage >= GATE_PHONE_COVERAGE and top >= GATE_TOP_TIER_MIN}
 
 
+def _gate_lines(pending: dict) -> list[str]:
+    tiers = pending.get("tiers", {})
+    with_phones = len(pending.get("records", {}))
+    without = len(pending.get("awaiting", [])) + len(pending.get("trace_no_hit", [])) \
+        + int(pending.get("no_hit", 0))
+    g = gate(tiers, with_phones, without)
+    verdict = (":white_check_mark: *Quality gate passed*" if g["passed"]
+               else ":warning: *Quality gate not met*")
+    lines = [f"{verdict}: {g['coverage'] * 100:.0f}% of records have phones (need 70%), "
+             f"{g['top_tier']} have a Dial First or Second number (need {GATE_TOP_TIER_MIN})."]
+    if not g["passed"] and not pending.get("awaiting"):
+        lines.append("Expect a thin dial session from these lists: consider deep prospecting "
+                     "on the records without a strong number.")
+    return lines
+
+
 def run_enrichment(pending: dict, client: DataSiftClient | None = None) -> str:
-    """Score, tag, gate. Returns the Slack summary."""
+    """Skip trace (if needed), score, tag, gate. Mutates `pending` with the
+    tiers so far and the records still awaiting skip trace results. Returns
+    the Slack summary."""
     api_key = os.environ.get("TRESTLE_API_KEY", "").strip()
     if not api_key:
         return ":warning: TRESTLE_API_KEY is not set on the P1 Manager, nothing was scored."
     client = client or DataSiftClient.from_env()
-    records = pending["records"]
-    tiers, stats = score_records(records, api_key)
+    lines = []
 
-    by_tier: dict[str, list[str]] = {}
-    for uuid, tier in tiers.items():
-        by_tier.setdefault(tier, []).append(uuid)
-    for tier, uuids in by_tier.items():
-        client.bulk_add_tags(uuids, [tier])
+    needs = list(pending.get("needs_trace", []))
+    if needs:
+        ok, why = start_skip_trace(client)
+        if ok:
+            pending["awaiting"] = needs
+            pending["trace_started"] = _now()
+            lines.append(f":mag: Skip trace started for {len(needs)} records. Their numbers are "
+                         "scored as results arrive; follow-ups will post here.")
+        else:
+            pending["trace_no_hit"] = needs
+            lines.append(f":warning: Skip trace not started: {why}")
 
-    g = gate(tiers, len(records), int(pending.get("no_phone", 0)))
-    dist = " | ".join(f"{t}: {len(by_tier.get(t, []))}" for t, _, _ in TIERS)
+    records = pending.get("records", {})
+    tiers, stats = score_records(records, api_key) if records else ({}, {"scored": 0, "failed": 0})
+    dist = _tag(client, tiers)
+    pending["tiers"] = tiers
+    pending["scored_phones"] = stats["scored"]
     cost = stats["scored"] * PRICE_PER_PHONE
-    verdict = (":white_check_mark: *Quality gate passed*" if g["passed"]
-               else ":warning: *Quality gate not met*")
-    lines = [
-        f":telephone_receiver: Scored {stats['scored']} numbers (~${cost:.2f}) and tagged "
-        f"{len(tiers)} records.",
-        dist,
-        f"{verdict}: {g['coverage'] * 100:.0f}% of records have phones (need 70%), "
-        f"{g['top_tier']} have a Dial First or Second number (need {GATE_TOP_TIER_MIN}).",
-    ]
+    lines.insert(0, f":telephone_receiver: Scored {stats['scored']} numbers (~${cost:.2f}) and "
+                    f"tagged {len(tiers)} records.")
+    lines.insert(1, " | ".join(f"{t}: {n}" for t, n in dist.items()))
     if stats["failed"]:
         lines.append(f"{stats['failed']} numbers could not be scored and were left untagged.")
-    if not g["passed"]:
-        lines.append("Expect a thin dial session from these lists: consider a skip trace or "
-                     "deep prospecting on the records without a strong number.")
+    lines += _gate_lines(pending)
     return "\n".join(lines)
+
+
+def check_skip_trace(pending: dict, client: DataSiftClient | None = None,
+                     final: bool = False) -> str | None:
+    """Score whatever skip trace results have landed for pending['awaiting'].
+    Returns a Slack follow-up when something changed (or on the final check),
+    else None. Mutates `pending`."""
+    awaiting = list(pending.get("awaiting", []))
+    if not awaiting:
+        return None
+    api_key = os.environ.get("TRESTLE_API_KEY", "").strip()
+    client = client or DataSiftClient.from_env()
+    landed: dict[str, list[str]] = {}
+    no_hit: list[str] = []
+    still: list[str] = []
+    for u, got in _read_many(client, awaiting).items():
+        if got is None or not got["skiptraced"]:
+            still.append(u)
+        elif got["phones"]:
+            landed[u] = got["phones"]
+        else:
+            no_hit.append(u)
+    if final:
+        no_hit += still
+        still = []
+
+    pending["awaiting"] = still
+    pending.setdefault("trace_no_hit", []).extend(no_hit)
+    if not landed and not no_hit:
+        return None
+
+    tiers, stats = score_records(landed, api_key) if landed else ({}, {"scored": 0, "failed": 0})
+    dist = _tag(client, tiers)
+    pending.setdefault("records", {}).update(landed)
+    pending.setdefault("tiers", {}).update(tiers)
+    pending["scored_phones"] = int(pending.get("scored_phones", 0)) + stats["scored"]
+
+    lines = [f":mag: Skip trace results: {len(landed)} records came back with numbers"
+             + (f", {len(no_hit)} with none" if no_hit else "") + "."]
+    if landed:
+        lines.append(f"Scored {stats['scored']} more numbers (~${stats['scored'] * PRICE_PER_PHONE:.2f}): "
+                     + " | ".join(f"{t}: {n}" for t, n in dist.items() if n))
+    if still:
+        lines.append(f"Still waiting on {len(still)} records; checking again later.")
+    elif final and no_hit:
+        lines.append(f"Stopped waiting after {SKIPTRACE_GIVE_UP_HOURS}h.")
+    lines += _gate_lines(pending)
+    return "\n".join(lines)
+
+
+def _expired(pending: dict) -> bool:
+    started = pending.get("trace_started")
+    if not started:
+        return True
+    t = datetime.fromisoformat(started)
+    return datetime.now(timezone.utc) - t > timedelta(hours=SKIPTRACE_GIVE_UP_HOURS)
+
+
+def run_followups(reply_in_thread) -> int:
+    """Called at each scheduled enrichment slot: finish any approved batch
+    still waiting on skip trace results. reply_in_thread(ts, text)."""
+    done = 0
+    for ts in list(state.load_pending_asks()):
+        with _trace_lock:
+            pending = state.load_pending_asks().get(ts) or {}
+            if pending.get("kind") != "enrich" or not pending.get("awaiting"):
+                continue
+            try:
+                msg = check_skip_trace(pending, final=_expired(pending))
+            except Exception:  # noqa: BLE001
+                log.exception("skip trace follow-up failed for %s", ts)
+                continue
+            state.save_pending_ask(ts, pending)
+        if msg:
+            reply_in_thread(ts, msg)
+            done += 1
+    return done
+
+
+def _watch(thread_ts: str, pending: dict, reply) -> None:
+    """Right after approval: poll for skip trace results for a while, so the
+    team usually sees them the same day. Whatever is left is picked up by
+    run_followups at the next scheduled slot."""
+    deadline = time.time() + SKIPTRACE_WATCH_MINUTES * 60
+    while time.time() < deadline:
+        time.sleep(SKIPTRACE_POLL_MINUTES * 60)
+        with _trace_lock:
+            pending = state.load_pending_asks().get(thread_ts) or {}
+            if not pending.get("awaiting"):
+                return
+            try:
+                msg = check_skip_trace(pending)
+            except Exception:  # noqa: BLE001
+                log.exception("skip trace watch failed")
+                continue
+            state.save_pending_ask(thread_ts, pending)
+        if msg:
+            reply(msg)
 
 
 # ---------------------------------------------------------------- the reply
@@ -354,7 +546,7 @@ def handle_reply(thread_ts: str, text: str, pending: dict, reply) -> None:
         reply(":no_entry_sign: Skipped. Nothing was charged and these lists won't be offered again.")
         return
     if not any(t.startswith(w) for w in APPROVE_WORDS):
-        reply("Reply *approve* to run the Trestle scoring, or *skip* to pass.")
+        reply("Reply *approve* to run it, or *skip* to pass.")
         return
 
     with _run_lock:  # one approval runs at a time; a double reply is a no-op
@@ -364,8 +556,11 @@ def handle_reply(thread_ts: str, text: str, pending: dict, reply) -> None:
         pending["status"] = "running"
         state.save_pending_ask(thread_ts, pending)
 
+    traced = len(pending.get("needs_trace", []))
     reply(f":hourglass_flowing_sand: Approved. Scoring {pending.get('phones', 0)} numbers "
-          f"(~${pending.get('est_cost', 0):.2f}). Results will post here.")
+          f"(~${pending.get('est_cost', 0):.2f})"
+          + (f" and starting a skip trace for {traced} records" if traced else "")
+          + ". Results will post here.")
 
     def _work():
         try:
@@ -378,5 +573,7 @@ def handle_reply(thread_ts: str, text: str, pending: dict, reply) -> None:
             pending["status"] = "pending"
         state.save_pending_ask(thread_ts, pending)
         reply(summary)
+        if pending["status"] == "done" and pending.get("awaiting"):
+            _watch(thread_ts, pending, reply)
 
     threading.Thread(target=_work, daemon=True, name="p1-enrich-run").start()

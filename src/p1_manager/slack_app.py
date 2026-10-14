@@ -107,6 +107,11 @@ def post_to_channel(text: str) -> str | None:
     return resp.get("ts") if resp.get("ok") else None
 
 
+def reply_in_thread(thread_ts: str, text: str) -> None:
+    _call("chat.postMessage", {"channel": _env("SLACK_CHANNEL_ID"), "thread_ts": thread_ts,
+                               "text": text, "unfurl_links": False})
+
+
 def post_monthly_report(report_text: str, csv_path: str | None = None) -> None:
     channel = _env("SLACK_CHANNEL_ID")
     # Slack truncates very long messages; keep the headline in chat and let

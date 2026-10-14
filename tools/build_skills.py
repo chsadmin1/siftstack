@@ -88,6 +88,11 @@ REQUIRES = {
                              note="Runs entirely through the Chrome extension. No API keys."),
     "deep-prospecting": dict(tier="none", fallback=None, note="Superseded. Manual research method."),
     "sift-operations": dict(tier="none", fallback=None),
+    "datasift-lead-management": dict(tier="account", accounts=["DataSift", "Claude in Chrome", "Google", "Slack"],
+                                     cost="Free",
+                                     fallback=None,
+                                     note="Custom fields are built through your logged-in DataSift tab. "
+                                          "The KPI bot needs a Google service account and a Slack webhook."),
     "vendor-directory-builder": dict(tier="none", fallback=None,
                                      note="Community mining needs your logged-in browser for private groups. The Excel engine is pure openpyxl."),
     "contractor-call-sheet": dict(tier="none", fallback=None,
@@ -181,6 +186,7 @@ CATEGORY = {
     "sift-sequences": "CRM",
     "account-blueprint": "CRM",
     "sift-operations": "CRM",
+    "datasift-lead-management": "CRM",
     "deal-analyzer": "Deal Analysis",
 }
 

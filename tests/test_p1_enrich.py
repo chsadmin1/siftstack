@@ -30,10 +30,17 @@ class FakeClient:
         self.list_members = {"L1": ["r0"]}
         self.records = {}
         self.tag_calls = []
+        self.stats = {"value_spent": 0.0, "saved_by_unlimited_skiptracing": 511.2}
+        self.trace_calls = []
 
     def api(self, path, method="GET", body=None, **_):
         if path.startswith("/api/internal/list/"):
             return {"results": self.lists}
+        if path == enrich.SKIPTRACE_STATS:
+            return self.stats
+        if path == enrich.SKIPTRACE_RUN:
+            self.trace_calls.append(body)
+            return {}
         uuid = path.rstrip("/").rsplit("/", 1)[-1]
         return self.records[uuid]
 
@@ -45,8 +52,9 @@ class FakeClient:
         return len(uuids)
 
 
-def _rec(phones, tags=()):
-    return {"owners": [{"phones": [{"phone": p} for p in phones]}], "tags": [{"name": t} for t in tags]}
+def _rec(phones, tags=(), traced=True):
+    return {"owners": [{"phones": [{"phone": p} for p in phones]}],
+            "tags": [{"name": t} for t in tags], "skiptraced": traced}
 
 
 def _reset():
@@ -74,7 +82,7 @@ def _seeded_client():
     c.records = {
         "r1": _rec(["(208) 555-0101", "2085550102"]),
         "r2": _rec(["+1 208 555 0101"]),                  # same number as r1: scored once
-        "r3": _rec([]),                                    # needs skip trace
+        "r3": _rec([], traced=False),                      # never traced
         "r4": _rec(["2085550104"], tags=["Dial Second"]),  # already tiered
     }
     return c
@@ -86,11 +94,12 @@ def test_preview_counts_unique_phones_and_waits_for_approval():
     assert out["phones"] == 2 and out["est_cost"] == 0.03, out
     text = posts[-1]
     assert "Ada Probate Oct" in text and "2 unique numbers" in text and "$0.03" in text
-    assert "1 records have no phone numbers" in text and "1 records already have a dial tier" in text
+    assert "1 records have never been skip traced" in text and "account" in text
+    assert "1 records already have a dial tier" in text
     ask = state.load_pending_asks()["ts1"]
     assert ask["kind"] == "enrich" and ask["status"] == "pending"
-    assert set(ask["records"]) == {"r1", "r2"}
-    assert c.tag_calls == []  # nothing written, nothing scored
+    assert set(ask["records"]) == {"r1", "r2"} and ask["needs_trace"] == ["r3"]
+    assert c.tag_calls == [] and c.trace_calls == []  # nothing written, scored or traced
     # The 12 PM run must not offer the same list again while it waits.
     again = enrich.run_preview(lambda t: posts.append(t) or "ts2", client=c)
     assert again == {"new_lists": 0}
@@ -123,17 +132,52 @@ def test_approve_scores_tags_by_tier_and_reports_gate():
     finally:
         enrich.trestle_score, enrich.DataSiftClient.from_env = orig_score, orig_client
 
-    assert "Approved" in replies[0], replies
+    assert "Approved" in replies[0] and "skip trace for 1 records" in replies[0], replies
+    assert c.trace_calls == [{}]  # the account-wide call, once
     assert c.tag_calls == [(["r1", "r2"], ["Dial First"])], c.tag_calls
     summary = replies[1]
     assert "Scored 1 numbers" in summary and "tagged 2 records" in summary
+    assert "Skip trace started for 1 records" in summary
     assert "1 numbers could not be scored" in summary
     assert "Quality gate not met" in summary  # 2 of 3 have phones is 67%, and only 2 top tier
-    assert state.load_pending_asks()["ts1"]["status"] == "done"
+    ask = state.load_pending_asks()["ts1"]
+    assert ask["status"] == "done" and ask["awaiting"] == ["r3"]
     assert state.load_enrich_state()["handled"]["L2"]["status"] == "enriched"
     # A second "approve" does not run it again.
     enrich.handle_reply("ts1", "approve", state.load_pending_asks()["ts1"], replies.append)
     assert "already done" in replies[-1]
+
+
+def test_skip_trace_follow_up_scores_new_numbers():
+    c = _seeded_client()
+    enrich.run_preview(lambda t: "ts1", client=c)
+    pending = state.load_pending_asks()["ts1"]
+    orig_score, orig_client = enrich.trestle_score, enrich.DataSiftClient.from_env
+    enrich.trestle_score = lambda p, k, s: {"2085550101": 90, "2085550102": 70, "2085550300": 65}.get(p)
+    enrich.DataSiftClient.from_env = classmethod(lambda cls: c)
+    posted = []
+    try:
+        enrich.run_enrichment(pending, client=c)
+        pending["status"] = "done"
+        state.save_pending_ask("ts1", pending)
+        # Results not in yet: nothing posted, still waiting.
+        assert enrich.run_followups(lambda ts, t: posted.append((ts, t))) == 0
+        c.records["r3"] = _rec(["2085550300"])  # the trace landed
+        assert enrich.run_followups(lambda ts, t: posted.append((ts, t))) == 1
+    finally:
+        enrich.trestle_score, enrich.DataSiftClient.from_env = orig_score, orig_client
+    assert posted[0][0] == "ts1" and "1 records came back with numbers" in posted[0][1]
+    assert c.tag_calls[-1] == (["r3"], ["Dial Second"]), c.tag_calls
+    ask = state.load_pending_asks()["ts1"]
+    assert ask["awaiting"] == [] and ask["tiers"]["r3"] == "Dial Second"
+    assert "100% of records have phones" in posted[0][1]
+
+
+def test_metered_plan_refuses_skip_trace():
+    c = FakeClient()
+    c.stats = {"value_spent": 12.5, "saved_by_unlimited_skiptracing": 0}
+    ok, why = enrich.start_skip_trace(c)
+    assert not ok and "whole account" in why and c.trace_calls == []
 
 
 def test_failed_phone_never_becomes_drop():

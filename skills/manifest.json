@@ -5,10 +5,10 @@
   "raw_base": "https://raw.githubusercontent.com/chsadmin1/siftstack/main",
   "install_target": "~/.claude/skills",
   "counts": {
-    "total": 28,
-    "current": 26,
+    "total": 29,
+    "current": 27,
     "skills": 26,
-    "plugins": 2
+    "plugins": 3
   },
   "categories": [
     "CRM",
@@ -25,7 +25,7 @@
   },
   "tier_counts": {
     "none": 13,
-    "account": 8,
+    "account": 9,
     "api": 5
   },
   "skills": [
@@ -39,7 +39,6 @@
       "source_dir": "skills/account-blueprint",
       "files": [
         "SKILL.md",
-        "blueprints/ty2_2026-09-10.json",
         "references/blueprint-format.md",
         "scripts/account_blueprint/__init__.py",
         "scripts/account_blueprint/apply.py",
@@ -53,8 +52,8 @@
         "scripts/account_blueprint/translate.py",
         "scripts/clone_account.py"
       ],
-      "file_count": 14,
-      "bytes": 404868,
+      "file_count": 13,
+      "bytes": 142423,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/account-blueprint.skill",
       "sha256": "73672b83be59f0598bfad28c1af81f56ac465b9379767e2631e14125dfed06bd",
       "requires": {
@@ -68,6 +67,51 @@
         "cost": "Free. Creates structure only; SiftMap auto-add is left OFF so no records are pulled",
         "fallback": "no-api-playbook#presets-by-hand",
         "note": "Apply needs your own DataSift JWT (or email + password). Export of your own account needs your Open API key."
+      }
+    },
+    {
+      "name": "datasift-lead-management",
+      "kind": "plugin",
+      "category": "CRM",
+      "version": "0.1.8",
+      "description": "Set up your DataSift account for lead management in minutes. Personalizes the Lead Manager Training for your company, auto-builds the complete 75-field custom field structure directly in your account, generates your branded training manual, and installs a daily KPI bot that posts to your Slack.",
+      "status": "current",
+      "source_dir": "plugins/datasift-lead-management",
+      "files": [
+        ".claude-plugin/plugin.json",
+        "skills/build-custom-fields/SKILL.md",
+        "skills/build-custom-fields/references/field-definitions.json",
+        "skills/generate-training-manual/SKILL.md",
+        "skills/generate-training-manual/references/Lead-Manager-Training-Manual-Template.docx",
+        "skills/generate-training-manual/references/Lead-Manager-Training-Template.html",
+        "skills/generate-training-manual/references/personalize.py",
+        "skills/setup-kpi-bot/SKILL.md",
+        "skills/setup-kpi-bot/references/bot-files/.env.template",
+        "skills/setup-kpi-bot/references/bot-files/KPI-REFERENCE.md",
+        "skills/setup-kpi-bot/references/bot-files/KPI-Tracking-Template.xlsx",
+        "skills/setup-kpi-bot/references/bot-files/kpi_slack_bot.py",
+        "skills/setup-kpi-bot/references/bot-files/requirements.txt",
+        "skills/setup-kpi-bot/references/bot-files/service_account.json.template",
+        "skills/setup-kpi-bot/references/google-cloud-setup.md",
+        "skills/setup-kpi-bot/references/slack-setup.md",
+        "skills/setup-my-training/SKILL.md"
+      ],
+      "file_count": 17,
+      "bytes": 1088256,
+      "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/datasift-lead-management.plugin",
+      "sha256": "365b89ba26d854867b68a648771165c0bdb65d8acd88071f10e21e16fc772828",
+      "requires": {
+        "tier": "account",
+        "accounts": [
+          "DataSift",
+          "Claude in Chrome",
+          "Google",
+          "Slack"
+        ],
+        "cost": "Free",
+        "fallback": null,
+        "note": "Custom fields are built through your logged-in DataSift tab. The KPI bot needs a Google service account and a Slack webhook.",
+        "env": []
       }
     },
     {
@@ -132,7 +176,7 @@
       "file_count": 9,
       "bytes": 107992,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/sift-sequences.skill",
-      "sha256": "fa5df619c5a911a4ade196e8fbe5dcbb769d9cf9021210920861dddcbe497a2c",
+      "sha256": "27e664407b27089164320042fcd1c2c267cb04ca7a41fbe7109f8e3cd4894286",
       "requires": {
         "tier": "account",
         "env": [
@@ -167,7 +211,7 @@
       "file_count": 8,
       "bytes": 76898,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/closer-coach.skill",
-      "sha256": "d795bfa383c10e3cac099cc31bd736046cdd522dda9face1580ecd3742d910b1",
+      "sha256": "763575bf3cac41b4c7a4bff8f63de9e09b8913f9a00b7bda22ceb43152fa9d1f",
       "requires": {
         "tier": "account",
         "accounts": [
@@ -205,7 +249,7 @@
       "file_count": 13,
       "bytes": 104768,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/cold-call-coach.skill",
-      "sha256": "a50055ea32e7eb853e0f29c1f869346edf557b6d1b5c253840b3a319587267c7",
+      "sha256": "c9884b6d8013122b821cd155b07e3be1f84f1c4be68871ba26b0d96cebbb25c1",
       "requires": {
         "tier": "account",
         "accounts": [
@@ -233,7 +277,7 @@
       "file_count": 3,
       "bytes": 33180,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/kpi-engine.skill",
-      "sha256": "a33f6806787f25298b95359325b82485467b8eadcdc686fdf357c5448712c8cc",
+      "sha256": "909602fd85e8a830b3fbccc9f619637604ec03c481f2061e8bc0a4e03a861931",
       "requires": {
         "tier": "account",
         "env": [
@@ -268,7 +312,7 @@
       "file_count": 8,
       "bytes": 76590,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/lead-manager-coach.skill",
-      "sha256": "6eb37dd410c56d7f9101469c446cbb1e9aedcdf2e468bac9caed7c3ea68fc4bc",
+      "sha256": "38811c2ae4803aac4f8f1a0b8149850c259e7fbb7bc5ac41112e35cd7e5ef2f6",
       "requires": {
         "tier": "account",
         "accounts": [
@@ -298,7 +342,7 @@
       "file_count": 5,
       "bytes": 17801,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/comp-package.skill",
-      "sha256": "61c5ccfbae1434497ac248908bbea4cd724be6e638828ca809b6a86f1cf38f5e",
+      "sha256": "975c5fb6f757adfe4ae8702582ee6f0b7686f755966874299894fbe479f12b95",
       "requires": {
         "tier": "api",
         "env": [
@@ -339,7 +383,7 @@
         "skills/rehab-estimator/scripts/generate_rehab_excel.py"
       ],
       "file_count": 18,
-      "bytes": 313732,
+      "bytes": 330970,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/deal-analyzer.plugin",
       "sha256": "90de537f12dc3cb54df90fd957f985e7c17dac2881a80d277a77229e4b0f1534",
       "requires": {
@@ -367,7 +411,7 @@
       "file_count": 1,
       "bytes": 40432,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/deep-prospecting.skill",
-      "sha256": "3fb7b821ad483bd5288dac89404e6c89c37da8ee5730172a2c0bf8e5393aa743",
+      "sha256": "56b198cc6f70751da4e0f426e53bb7db9962d1930d5dcb2cf303b0a05d479697",
       "superseded_by": "deep-prospecting-v5",
       "requires": {
         "tier": "none",
@@ -398,7 +442,7 @@
       "file_count": 7,
       "bytes": 85288,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/deep-prospecting-v4.skill",
-      "sha256": "02ee79406e8f8cfffc7df2a0561a382956613a504849553108803538162d18af",
+      "sha256": "d5414b6706aeba2dd65cb0bd47d164a502da4854ac793e26818d8373e0e772c8",
       "superseded_by": "deep-prospecting-v5",
       "requires": {
         "tier": "api",
@@ -438,7 +482,7 @@
       "file_count": 12,
       "bytes": 79198,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/deep-prospecting-v5.skill",
-      "sha256": "5a1527b3a13b5d9bc878ff5dba84dc5cf1a29399439fdb1b94df0b7f889b6554",
+      "sha256": "643390de59bffd1ff8b260988ba790af56fc1ec07ddd6e241abbb1a2bbd0b7dd",
       "requires": {
         "tier": "api",
         "env": [
@@ -466,7 +510,7 @@
       "file_count": 1,
       "bytes": 32693,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/probate-property-finder.skill",
-      "sha256": "c6fd3275ad21c8b8dfb347ed3cd8021f1b5ca4130a0e19034d34953f38aff22f",
+      "sha256": "dba07afffe97d04897b2eee8a514cff404df72763fa0136b935abfa3120abd24",
       "requires": {
         "tier": "none",
         "fallback": null,
@@ -493,9 +537,9 @@
         "scripts/generate_excel_report.py"
       ],
       "file_count": 6,
-      "bytes": 83133,
+      "bytes": 73803,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/real-estate-comping.skill",
-      "sha256": "33e7abcf50d360f19efd1b3fe71baf328f7dab346883a18087f90f35de3eefd9",
+      "sha256": "c61e97359027732cc48cd6d46a6378d34f20dd2533c10caa4f76b5f45c7efa73",
       "requires": {
         "tier": "none",
         "fallback": null,
@@ -582,7 +626,7 @@
       "file_count": 6,
       "bytes": 142423,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/first-market-county-data.skill",
-      "sha256": "cd2fb68216cf76da4ec0b3c3158bd9c2f64a38d7556a6d43445470e4901ba8f6",
+      "sha256": "5ca912c27cf50725da5ab0a1fc119a59d2218fccbaf4b409d980751dc1015738",
       "requires": {
         "tier": "none",
         "fallback": null,
@@ -612,7 +656,7 @@
       "file_count": 7,
       "bytes": 12095045,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/sift-market-research.skill",
-      "sha256": "fa33ec18ebc641fecd3dbafe2c0823ca063e989de3168f6836c5ad89cff6722a",
+      "sha256": "e8a669e97f670dceb433cc299efa757271b99c55fb380712f9316ab765117b00",
       "requires": {
         "tier": "account",
         "env": [
@@ -658,7 +702,7 @@
       "file_count": 18,
       "bytes": 215945,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/caller-reputation-monitor.skill",
-      "sha256": "6dfa469f64d4f911f680a9d45003050806b9e68f76ee3163d6ed094d72d53e5c",
+      "sha256": "8495fb61fae4f76895351307a8a6d7352dfdd3fb2d56345f8dd524426e610b1f",
       "requires": {
         "tier": "api",
         "env": [
@@ -697,7 +741,7 @@
       "file_count": 12,
       "bytes": 43658,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/candidate-intake.skill",
-      "sha256": "17c513c2468cdd2125373950c1708783feeebeb483749ea35ad3a79dca5dff9f",
+      "sha256": "86a3bc2ddb622c387ad5f9b3b7651a3018c0f51b92dc74340fe9a924d9c856cd",
       "requires": {
         "tier": "none",
         "accounts": [
@@ -755,7 +799,7 @@
       "file_count": 6,
       "bytes": 76925,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/phone-validator.skill",
-      "sha256": "bc00ed89023f1c572b9beb2f390fa7cd465924d26e901f3f0be5c98ee293d850",
+      "sha256": "44aefb766b2f716196881cb1118cd64bc528128a86c210eb3750733ec7155603",
       "requires": {
         "tier": "api",
         "env": [
@@ -824,7 +868,7 @@
       "file_count": 6,
       "bytes": 65292,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/sequential-presets.skill",
-      "sha256": "7907c114b3bff2d4db9b663130f9e9e3805c42ba46b8017165255c2e55fc135d",
+      "sha256": "f84cc27be4f78efdc1f08426961ee7e624a98d91b8f536380cdab10656e50856",
       "requires": {
         "tier": "account",
         "env": [
@@ -856,7 +900,7 @@
       "file_count": 5,
       "bytes": 28005,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/team-hiring.skill",
-      "sha256": "ef1fc8b7c3461ecddfb7abde09b08e2b4f4593132810cb39c5c3feea0747ad21",
+      "sha256": "5b1220ba3c8f27ebc48054f52aece2bf8ad0935fed9b3fb9d695331df1988c75",
       "requires": {
         "tier": "none",
         "fallback": null,
@@ -881,7 +925,7 @@
       "file_count": 3,
       "bytes": 30795,
       "download": "https://raw.githubusercontent.com/chsadmin1/siftstack/main/dist/text-touch-builder.skill",
-      "sha256": "ee627d292a0a2e4a03de07413bf91311e6db8f7365717097a221918acf8c7ea8",
+      "sha256": "b13612bcfef29f2d136ce8436d2c9d2153bee2f70427f371a9eeb7d752ba6efe",
       "requires": {
         "tier": "none",
         "fallback": null,

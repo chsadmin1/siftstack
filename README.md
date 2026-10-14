@@ -118,6 +118,7 @@ The manifest is the machine-readable index of the whole library: every package, 
 | `sift-sequences` | 26 sequence templates and how to build them. |
 | `account-blueprint` | Build a DataSift account in the reference account's structure over the API: presets, statuses, lists, tags, custom fields, task presets, sequences, SiftMap presets, every object read back. Ships the current blueprint. |
 | `sift-operations` (plugin) | The CRM operations encyclopedia: SiftLine boards, drip campaigns, tasks, filters, tags, skip trace workflows. |
+| `datasift-lead-management` (plugin) | Set up a DataSift account for lead management: personalize the Lead Manager Training, build the 75-field custom field structure in your account, generate a branded training manual, and install a daily KPI bot that posts to Slack. |
 
 Two superseded packages (`deep-prospecting`, `deep-prospecting-v4`) stay in the repo so old runs still resolve. The installer skips them unless you ask for one by name. Use `deep-prospecting-v5`, which is about 5x cheaper and returns relatives on records where v4 returned nothing.
 

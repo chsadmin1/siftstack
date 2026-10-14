@@ -1,0 +1,8 @@
+{
+  "name": "datasift-lead-management",
+  "version": "0.1.8",
+  "description": "Set up your DataSift account for lead management in minutes. Personalizes the Lead Manager Training for your company, auto-builds the complete 75-field custom field structure directly in your account, generates your branded training manual, and installs a daily KPI bot that posts to your Slack.",
+  "author": {
+    "name": "DataSift"
+  }
+}

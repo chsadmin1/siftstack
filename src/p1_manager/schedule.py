@@ -196,6 +196,9 @@ def run_enrich() -> None:
     try:
         import enrich
         import slack_app
+        followups = enrich.run_followups(slack_app.reply_in_thread)
+        if followups:
+            logger.info("Posted %d skip trace follow-up(s)", followups)
         result = enrich.run_preview(slack_app.post_to_channel)
         logger.info("Enrichment preview finished in %.0fs: %s", time.time() - started, result)
     except Exception:
