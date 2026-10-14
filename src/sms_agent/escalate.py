@@ -34,27 +34,53 @@ def _is_discord(url: str) -> bool:
     return "discord.com" in (url or "")
 
 
-def _post_bot(text: str, blocks: Optional[list]) -> bool:
-    """chat.postMessage with the Slack app's bot token (config.SLACK_CHANNEL)."""
-    payload: dict = {"channel": config.SLACK_CHANNEL, "text": text, "unfurl_links": False}
-    if blocks:
-        payload["blocks"] = blocks
+LAST_BOT_ERROR = ""
+
+
+def _slack(method: str, payload: dict) -> dict:
     try:
         resp = requests.post(
-            "https://slack.com/api/chat.postMessage",
+            f"https://slack.com/api/{method}",
             data=json.dumps(payload),
             headers={"Content-Type": "application/json; charset=utf-8",
                      "Authorization": f"Bearer {config.SLACK_BOT_TOKEN}"},
             timeout=15,
         )
-        data = resp.json()
+        return resp.json()
     except (requests.RequestException, ValueError) as exc:
-        log.warning("escalation post failed: %s", exc)
-        return False
+        return {"ok": False, "error": f"request failed: {exc}"}
+
+
+def bot_identity() -> dict:
+    """Which Slack app/workspace the bot token belongs to (auth.test)."""
+    if not config.SLACK_BOT_TOKEN:
+        return {"ok": False, "error": "no SMS_AGENT_SLACK_BOT_TOKEN"}
+    d = _slack("auth.test", {})
+    return {k: d.get(k) for k in ("ok", "error", "team", "team_id", "user", "user_id", "bot_id")}
+
+
+def _post_bot(text: str, blocks: Optional[list]) -> bool:
+    """chat.postMessage with the Slack app's bot token (config.SLACK_CHANNEL).
+
+    On not_in_channel the bot joins the channel itself (works for a public
+    channel when the app has channels:join) and tries once more."""
+    global LAST_BOT_ERROR
+    payload: dict = {"channel": config.SLACK_CHANNEL, "text": text, "unfurl_links": False}
+    if blocks:
+        payload["blocks"] = blocks
+    data = _slack("chat.postMessage", payload)
+    if data.get("error") == "not_in_channel":
+        joined = _slack("conversations.join", {"channel": config.SLACK_CHANNEL})
+        if joined.get("ok"):
+            log.info("joined Slack channel %s", config.SLACK_CHANNEL)
+            data = _slack("chat.postMessage", payload)
+        else:
+            data = {"ok": False, "error": f"not_in_channel (self-join failed: {joined.get('error')})"}
     if not data.get("ok"):
-        # not_in_channel: invite the app to the channel (/invite @app).
-        log.warning("escalation post failed: Slack %s", data.get("error"))
+        LAST_BOT_ERROR = str(data.get("error"))
+        log.warning("escalation post failed: Slack %s", LAST_BOT_ERROR)
         return False
+    LAST_BOT_ERROR = ""
     return True
 
 

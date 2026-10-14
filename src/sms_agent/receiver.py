@@ -225,7 +225,9 @@ def canary(secret: str, request: Request, to: str) -> Any:
         f":test_tube: Go-live test text {'sent' if result.ok else 'FAILED'} from {from_number} "
         f"to the team phone ending {phone[-4:]}."
         + ("" if result.ok else f" Error: {result.error}"))
-    return {"ok": result.ok, "slack": slack_ok, "from": from_number, "sms_id": result.sms_id,
+    slack_detail = {"bot": escalate.bot_identity(), "channel": config.SLACK_CHANNEL,
+                    "bot_error": escalate.LAST_BOT_ERROR}
+    return {"ok": result.ok, "slack": slack_ok, "slack_detail": slack_detail, "from": from_number, "sms_id": result.sms_id,
             "error": result.error, "status_code": result.status_code}
 
 
