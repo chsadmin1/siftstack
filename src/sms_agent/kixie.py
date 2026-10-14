@@ -242,6 +242,13 @@ def normalize_webhook(payload: dict) -> dict:
             out["event"] = f"kixie:sms:{direction or 'unknown'}"
         return out
 
+    # Kixie's UI calls the disposition webhook "Call Outcome". The developer
+    # sample sends hookevent "disposition"; accept the outcome spellings too,
+    # and a payload with a disposition but no hookevent at all, so an outcome
+    # is never filed as an unknown event.
+    if hook in ("calloutcome", "call_outcome", "outcome") or (
+            not hook and "disposition" in d and "message" not in d):
+        hook = "disposition"
     if hook in ("endcall", "disposition"):
         details = d.get("callDetails") if isinstance(d.get("callDetails"), dict) else {}
         customer = _num(d.get("customernumber") or d.get("phone"))
