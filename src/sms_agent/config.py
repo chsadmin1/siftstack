@@ -105,6 +105,11 @@ REISIFT_API_KEY = _env("REISIFT_API_KEY", "")
 
 # ---------------------------------------------------------------- Slack
 SLACK_WEBHOOK_URL = _env("SMS_AGENT_SLACK_WEBHOOK") or _env("SLACK_WEBHOOK_URL", "")
+# Preferred over the webhook when both are set: a Slack app bot token plus a
+# channel id posts with chat.postMessage, so the channel is chosen here rather
+# than baked into a webhook URL. The bot must be a member of the channel.
+SLACK_BOT_TOKEN = _env("SMS_AGENT_SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL = _env("SMS_AGENT_SLACK_CHANNEL", "")
 # The dispo program posts to its OWN channel. Buyer traffic and seller
 # traffic are different audiences and different people act on them, so
 # a single webhook would put 'a price went out to 156 buyers' in the
@@ -480,8 +485,9 @@ def missing() -> list[str]:
         gaps.append("SMS_AGENT_NUMBERS / config/sms_numbers.json (no sending pool)")
     if PHASE >= 3 and not ANTHROPIC_API_KEY:
         gaps.append("ANTHROPIC_API_KEY (cannot generate replies)")
-    if PHASE >= 2 and not SLACK_WEBHOOK_URL:
-        gaps.append("SMS_AGENT_SLACK_WEBHOOK (cannot escalate to the prospector channel)")
+    if PHASE >= 2 and not SLACK_WEBHOOK_URL and not (SLACK_BOT_TOKEN and SLACK_CHANNEL):
+        gaps.append("SMS_AGENT_SLACK_WEBHOOK or SMS_AGENT_SLACK_BOT_TOKEN + SMS_AGENT_SLACK_CHANNEL "
+                    "(cannot escalate to the prospector channel)")
     if VM_FOLLOWUP_ENABLED and not CALL_LOG_POLL:
         gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone call dispositions, and "
                     "SMS_AGENT_CALL_LOG_POLL says calls happen in another dialer")

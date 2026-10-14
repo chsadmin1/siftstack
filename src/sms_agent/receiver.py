@@ -219,7 +219,13 @@ def canary(secret: str, request: Request, to: str) -> Any:
                           sms_id=result.sms_id, author="canary")
         store.record_send(from_number, phone)
     log.info("canary to ...%s from %s: ok=%s %s", phone[-4:], from_number, result.ok, result.error)
-    return {"ok": result.ok, "from": from_number, "sms_id": result.sms_id,
+    from . import escalate
+
+    slack_ok = escalate._post(
+        f":test_tube: Go-live test text {'sent' if result.ok else 'FAILED'} from {from_number} "
+        f"to the team phone ending {phone[-4:]}."
+        + ("" if result.ok else f" Error: {result.error}"))
+    return {"ok": result.ok, "slack": slack_ok, "from": from_number, "sms_id": result.sms_id,
             "error": result.error, "status_code": result.status_code}
 
 

@@ -138,6 +138,9 @@ def test_canary_only_texts_allowlisted_team_phones():
     old = (config.WEBHOOK_SECRET, config.CANARY_NUMBERS, transport.send, config.SENDER_NAME)
     config.WEBHOOK_SECRET, config.CANARY_NUMBERS, config.SENDER_NAME = "s3cret", ["+12085551234"], "Nick"
     transport.send = lambda to, body, frm="": sent.append((to, frm)) or SendResult(True, sms_id="sm1")
+    from src.sms_agent import escalate
+    old_post = escalate._post
+    escalate._post = lambda text, blocks=None, program="": True
     try:
         c = TestClient(receiver.app)
         assert c.post("/hooks/wrong/canary?to=2085551234").status_code == 404
@@ -146,8 +149,33 @@ def test_canary_only_texts_allowlisted_team_phones():
         assert r.status_code == 200 and r.json()["ok"], r.text
     finally:
         config.WEBHOOK_SECRET, config.CANARY_NUMBERS, transport.send, config.SENDER_NAME = old
+        escalate._post = old_post
+    assert r.json()["slack"] is True
     assert sent == [("2085551234", "+12085550100")], sent  # from Nick's pool number
     assert store.get_conversation("2085551234")["from_number"] == "+12085550100"
+
+
+def test_slack_uses_bot_token_and_channel_before_webhook():
+    from src.sms_agent import config, escalate
+    calls = []
+
+    class R:
+        def __init__(self, data): self._d = data; self.status_code = 200; self.text = ""
+        def json(self): return self._d
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        calls.append((url, json.loads(data), headers.get("Authorization")))
+        return R({"ok": True}) if "chat.postMessage" in url else R({})
+    old = (config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL, escalate.requests.post)
+    config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL = "xoxb-test", "C0C74TX29E2"
+    config.SLACK_WEBHOOK_URL = "https://hooks.example/old"
+    escalate.requests.post = fake_post
+    try:
+        assert escalate._post("hot lead") is True
+    finally:
+        config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL, escalate.requests.post = old
+    assert len(calls) == 1 and calls[0][0].endswith("chat.postMessage")
+    assert calls[0][1]["channel"] == "C0C74TX29E2" and calls[0][2] == "Bearer xoxb-test"
 
 
 def test_call_log_window_excludes_other_days():

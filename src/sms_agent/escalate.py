@@ -34,8 +34,38 @@ def _is_discord(url: str) -> bool:
     return "discord.com" in (url or "")
 
 
+def _post_bot(text: str, blocks: Optional[list]) -> bool:
+    """chat.postMessage with the Slack app's bot token (config.SLACK_CHANNEL)."""
+    payload: dict = {"channel": config.SLACK_CHANNEL, "text": text, "unfurl_links": False}
+    if blocks:
+        payload["blocks"] = blocks
+    try:
+        resp = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     "Authorization": f"Bearer {config.SLACK_BOT_TOKEN}"},
+            timeout=15,
+        )
+        data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("escalation post failed: %s", exc)
+        return False
+    if not data.get("ok"):
+        # not_in_channel: invite the app to the channel (/invite @app).
+        log.warning("escalation post failed: Slack %s", data.get("error"))
+        return False
+    return True
+
+
 def _post(text: str, blocks: Optional[list] = None,
           program: str = "") -> bool:
+    if program not in ("buyer", "dispo") and config.SLACK_BOT_TOKEN and config.SLACK_CHANNEL:
+        if _post_bot(text, blocks):
+            return True
+        if not config.SLACK_WEBHOOK_URL:
+            return False
+        log.warning("bot post failed; falling back to the webhook")
     if program in ("buyer", "dispo"):
         url = (config.DISPO_SLACK_WEBHOOK_URL
                or config.SLACK_WEBHOOK_URL)

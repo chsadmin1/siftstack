@@ -61,6 +61,9 @@ primary_region = 'iad'
   SMS_AGENT_CAMPAIGN = '1'
   SMS_AGENT_CAMPAIGN_PRESET = 'Autotext'
   SMS_AGENT_CAMPAIGN_TZ = 'America/Boise'
+  # Hot leads and the daily campaign summary go to #text-responses, posted by
+  # the CHS Slack app (SMS_AGENT_SLACK_BOT_TOKEN, which must be a member).
+  SMS_AGENT_SLACK_CHANNEL = 'C0C74TX29E2'
   SMS_AGENT_BUSINESS_TZ = 'America/Boise'
   # Calls are on Kixie, so the smrtPhone call-log poll and the voicemail
   # follow-up (which reads smrtPhone call dispositions) have nothing to read.
