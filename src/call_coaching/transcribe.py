@@ -27,6 +27,7 @@ import argparse
 import base64
 import concurrent.futures
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -110,6 +111,9 @@ def _log_recording_url(call_id) -> str | None:
 
 
 def _env(key: str) -> str:
+    # The process environment wins, so a CI job (no .env) can run this too.
+    if os.environ.get(key):
+        return os.environ[key].strip()
     for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
         if line.startswith(key + "="):
             return line.split("=", 1)[1].strip()

@@ -1,0 +1,83 @@
+name: Daily call coaching (Kixie)
+
+# Grades a sample of yesterday's Kixie calls per rep against the cold call /
+# lead manager / closer rubrics, appends one row per call to the CHS call
+# audit Google Sheet, and posts a summary to the CHS sales Slack channel.
+# Source: src/call_coaching/kixie_daily_audit.py. The call log comes from the
+# chs-sms-agent app, which stores every Kixie end-call webhook.
+#
+# Runs Tuesday to Saturday at 7:30 AM Mountain (reviewing Monday to Friday).
+# GitHub cron is UTC with no daylight saving, so there are two triggers and
+# the gate step below lets through only the one that is 7:30 in Boise today.
+
+on:
+  schedule:
+    - cron: '30 13 * * 2-6'   # 7:30 AM MDT
+    - cron: '30 14 * * 2-6'   # 7:30 AM MST
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Call date to review, YYYY-MM-DD (blank = yesterday, Mountain time)"
+        required: false
+        type: string
+      per_rep:
+        description: "Calls to grade per rep"
+        required: false
+        default: '3'
+        type: string
+      dry_run:
+        description: "Dry run: list the sample only (no transcription, grading, sheet or Slack)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: chs-call-coaching
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Daylight-saving gate
+        id: gate
+        run: |
+          offset=$(TZ=America/Boise date +%z)
+          run=yes
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "$offset" = "-0600" ] && [ "${{ github.event.schedule }}" != "30 13 * * 2-6" ]; then run=no; fi
+            if [ "$offset" = "-0700" ] && [ "${{ github.event.schedule }}" != "30 14 * * 2-6" ]; then run=no; fi
+          fi
+          echo "Boise offset $offset, run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.gate.outputs.run == 'yes'
+        run: pip install "anthropic>=0.100.0" google-api-python-client google-auth tzdata
+
+      - name: Run daily audit
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          SMS_AGENT_URL: https://chs-sms-agent.fly.dev
+          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET || secrets.CHS_SMS_WEBHOOK_SECRET }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CHS_ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          CALL_AUDIT_SPREADSHEET_ID: ${{ secrets.CALL_AUDIT_SPREADSHEET_ID }}
+          SLACK_CALL_AUDIT_WEBHOOK_URL: ${{ secrets.SLACK_SALES_WEBHOOK_URL }}
+          CALL_COACH_REP_ROLES: ${{ vars.CALL_COACH_REP_ROLES }}
+          CALL_COACH_EXCLUDE: ${{ vars.CALL_COACH_EXCLUDE }}
+        run: |
+          ARGS=(--per-rep "${{ inputs.per_rep || '3' }}")
+          if [ -n "${{ inputs.date }}" ]; then ARGS+=(--date "${{ inputs.date }}"); fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
+          python src/call_coaching/kixie_daily_audit.py "${ARGS[@]}"

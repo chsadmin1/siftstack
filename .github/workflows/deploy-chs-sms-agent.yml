@@ -56,14 +56,15 @@ jobs:
         env:
           DATASIFT_EMAIL: ${{ secrets.DATASIFT_EMAIL }}
           DATASIFT_PASSWORD: ${{ secrets.DATASIFT_PASSWORD }}
-          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          KIXIE_API_KEY: ${{ secrets.KIXIE_API_KEY }}
-          KIXIE_BUSINESS_ID: ${{ secrets.KIXIE_BUSINESS_ID }}
-          KIXIE_AGENT_EMAIL: ${{ secrets.KIXIE_AGENT_EMAIL }}
-          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY }}
+          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET || secrets.CHS_SMS_WEBHOOK_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CHS_ANTHROPIC_API_KEY }}
+          KIXIE_API_KEY: ${{ secrets.KIXIE_API_KEY || secrets.CHS_KIXIE_API_KEY }}
+          KIXIE_BUSINESS_ID: ${{ secrets.KIXIE_BUSINESS_ID || secrets.CHS_KIXIE_BUSINESS_ID }}
+          KIXIE_AGENT_EMAIL: ${{ secrets.KIXIE_AGENT_EMAIL || secrets.CHS_KIXIE_AGENT_EMAIL }}
+          REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY || secrets.CHS_REISIFT_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS }}
+          SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS || secrets.CHS_SMS_NUMBERS }}
+          SMS_AGENT_REP_NUMBERS: ${{ secrets.SMS_AGENT_REP_NUMBERS }}
         run: |
           set -e
           for req in DATASIFT_EMAIL DATASIFT_PASSWORD SMS_AGENT_WEBHOOK_SECRET; do
@@ -87,6 +88,9 @@ jobs:
           add SLACK_WEBHOOK_URL SMS_AGENT_SLACK_WEBHOOK
           # Sending pool as JSON, e.g. {"Nick": ["+12085550100"]}.
           add SMS_AGENT_NUMBERS SMS_AGENT_NUMBERS
+          # Which rep owns each Kixie number, for call coaching, e.g.
+          # {"+12085550100": "Nick"}. Optional; see src/sms_agent/call_log.py.
+          add SMS_AGENT_REP_NUMBERS SMS_AGENT_REP_NUMBERS
           flyctl secrets set -a chs-sms-agent --stage "${ARGS[@]}"
 
       - name: Deploy to Fly
