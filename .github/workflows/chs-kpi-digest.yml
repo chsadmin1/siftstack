@@ -38,6 +38,9 @@ jobs:
             if [ "$offset" = "-0600" ] && [ "${{ github.event.schedule }}" != "0 23 * * 1-5" ]; then run=no; fi
             if [ "$offset" = "-0700" ] && [ "${{ github.event.schedule }}" != "0 0 * * 2-6" ]; then run=no; fi
           fi
+          if [ -z "${{ secrets.SLACK_SALES_WEBHOOK_URL }}" ]; then echo "::notice::SLACK_SALES_WEBHOOK_URL is not set yet; skipping (see docs/setup/chs-coaching-and-kpi.md)"; run=no; fi
+          if [ -z "${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}" ]; then echo "::notice::GOOGLE_SERVICE_ACCOUNT_KEY is not set yet; skipping (see docs/setup/chs-coaching-and-kpi.md)"; run=no; fi
+          if [ -z "${{ secrets.KPI_SPREADSHEET_ID }}" ]; then echo "::notice::KPI_SPREADSHEET_ID is not set yet; skipping (see docs/setup/chs-coaching-and-kpi.md)"; run=no; fi
           echo "Boise offset $offset, run=$run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
