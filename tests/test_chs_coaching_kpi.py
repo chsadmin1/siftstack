@@ -141,6 +141,8 @@ def test_canary_only_texts_allowlisted_team_phones():
     from src.sms_agent import escalate
     old_post = escalate._post
     escalate._post = lambda text, blocks=None, program="": True
+    old_ident = escalate.bot_identity
+    escalate.bot_identity = lambda: {"ok": True, "team": "CHS"}
     try:
         c = TestClient(receiver.app)
         assert c.post("/hooks/wrong/canary?to=2085551234").status_code == 404
@@ -150,7 +152,8 @@ def test_canary_only_texts_allowlisted_team_phones():
     finally:
         config.WEBHOOK_SECRET, config.CANARY_NUMBERS, transport.send, config.SENDER_NAME = old
         escalate._post = old_post
-    assert r.json()["slack"] is True
+        escalate.bot_identity = old_ident
+    assert r.json()["slack"] is True and r.json()["slack_detail"]["bot"]["team"] == "CHS"
     assert sent == [("2085551234", "+12085550100")], sent  # from Nick's pool number
     assert store.get_conversation("2085551234")["from_number"] == "+12085550100"
 
@@ -176,6 +179,31 @@ def test_slack_uses_bot_token_and_channel_before_webhook():
         config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL, escalate.requests.post = old
     assert len(calls) == 1 and calls[0][0].endswith("chat.postMessage")
     assert calls[0][1]["channel"] == "C0C74TX29E2" and calls[0][2] == "Bearer xoxb-test"
+
+
+def test_slack_bot_joins_channel_on_not_in_channel():
+    from src.sms_agent import config, escalate
+    seq = []
+
+    class R:
+        def __init__(self, d): self._d = d
+        def json(self): return self._d
+    joined = {"v": False}
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        m = url.rsplit("/", 1)[-1]; seq.append(m)
+        if m == "conversations.join":
+            joined["v"] = True
+            return R({"ok": True})
+        return R({"ok": True}) if joined["v"] else R({"ok": False, "error": "not_in_channel"})
+    old = (config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL, escalate.requests.post)
+    config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL = "xoxb-t", "C1", ""
+    escalate.requests.post = fake_post
+    try:
+        assert escalate._post("hi") is True
+    finally:
+        config.SLACK_BOT_TOKEN, config.SLACK_CHANNEL, config.SLACK_WEBHOOK_URL, escalate.requests.post = old
+    assert seq == ["chat.postMessage", "conversations.join", "chat.postMessage"], seq
 
 
 def test_call_log_window_excludes_other_days():
