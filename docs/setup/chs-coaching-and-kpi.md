@@ -67,8 +67,8 @@ In Settings > Secrets and variables > Actions:
 | `KPI_SPREADSHEET_ID` | KPI sheet ID |
 | `CALL_AUDIT_SPREADSHEET_ID` | call audit sheet ID |
 | `OPENROUTER_API_KEY` | openrouter.ai key, for transcription |
-| `ANTHROPIC_API_KEY` | already set for the SMS agent |
-| `SMS_AGENT_WEBHOOK_SECRET` | already set |
+| `ANTHROPIC_API_KEY` | already set as `CHS_ANTHROPIC_API_KEY`; either name works |
+| `SMS_AGENT_WEBHOOK_SECRET` | already set as `CHS_SMS_WEBHOOK_SECRET`; either name works |
 
 Variables tab (optional, not secret):
 

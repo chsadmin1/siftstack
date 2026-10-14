@@ -68,9 +68,9 @@ jobs:
         if: steps.gate.outputs.run == 'yes'
         env:
           SMS_AGENT_URL: https://chs-sms-agent.fly.dev
-          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET }}
+          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET || secrets.CHS_SMS_WEBHOOK_SECRET }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || secrets.CHS_ANTHROPIC_API_KEY }}
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
           CALL_AUDIT_SPREADSHEET_ID: ${{ secrets.CALL_AUDIT_SPREADSHEET_ID }}
           SLACK_CALL_AUDIT_WEBHOOK_URL: ${{ secrets.SLACK_SALES_WEBHOOK_URL }}
