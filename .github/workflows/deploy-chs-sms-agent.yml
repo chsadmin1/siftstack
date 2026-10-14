@@ -66,6 +66,7 @@ jobs:
           SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS || secrets.CHS_SMS_NUMBERS }}
           SMS_AGENT_REP_NUMBERS: ${{ secrets.SMS_AGENT_REP_NUMBERS }}
           SMS_AGENT_CANARY_NUMBERS: ${{ secrets.SMS_AGENT_CANARY_NUMBERS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
           set -e
           for req in DATASIFT_EMAIL DATASIFT_PASSWORD SMS_AGENT_WEBHOOK_SECRET; do
@@ -92,6 +93,9 @@ jobs:
           # Team phones allowed to receive the go-live test text
           # (POST /hooks/<secret>/canary). Comma separated.
           add SMS_AGENT_CANARY_NUMBERS SMS_AGENT_CANARY_NUMBERS
+          # The CHS Slack app's bot token (shared with the P1 Manager). Posts
+          # go to SMS_AGENT_SLACK_CHANNEL in fly.chs-sms-agent.toml.
+          add SLACK_BOT_TOKEN SMS_AGENT_SLACK_BOT_TOKEN
           flyctl secrets set -a chs-sms-agent --stage "${ARGS[@]}"
 
       - name: Deploy to Fly

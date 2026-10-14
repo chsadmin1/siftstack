@@ -64,7 +64,9 @@ def cmd_doctor(args) -> int:
         print("  WARNING: no sender names. Threads will go out unsigned rather than")
         print("           risk the model inventing a name.")
 
-    print(f"slack          {'configured' if config.SLACK_WEBHOOK_URL else 'NOT configured'}")
+    slack = ("bot -> " + config.SLACK_CHANNEL) if (config.SLACK_BOT_TOKEN and config.SLACK_CHANNEL) else (
+        "webhook" if config.SLACK_WEBHOOK_URL else "NOT configured")
+    print(f"slack          {slack}")
     print(f"playbook       {len(__import__('sms_agent.knowledge', fromlist=['x']).playbook())} chars")
 
     if config.WEBHOOK_SECRET:
