@@ -65,6 +65,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS || secrets.CHS_SMS_NUMBERS }}
           SMS_AGENT_REP_NUMBERS: ${{ secrets.SMS_AGENT_REP_NUMBERS }}
+          SMS_AGENT_CANARY_NUMBERS: ${{ secrets.SMS_AGENT_CANARY_NUMBERS }}
         run: |
           set -e
           for req in DATASIFT_EMAIL DATASIFT_PASSWORD SMS_AGENT_WEBHOOK_SECRET; do
@@ -88,6 +89,9 @@ jobs:
           # Which rep owns each Kixie number, for call coaching, e.g.
           # {"+12085550100": "Nick"}. Optional; see src/sms_agent/call_log.py.
           add SMS_AGENT_REP_NUMBERS SMS_AGENT_REP_NUMBERS
+          # Team phones allowed to receive the go-live test text
+          # (POST /hooks/<secret>/canary). Comma separated.
+          add SMS_AGENT_CANARY_NUMBERS SMS_AGENT_CANARY_NUMBERS
           flyctl secrets set -a chs-sms-agent --stage "${ARGS[@]}"
 
       - name: Deploy to Fly

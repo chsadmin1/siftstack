@@ -148,6 +148,10 @@ CALL_TAKEOVER_MIN_SECONDS = int(_env("SMS_AGENT_CALL_TAKEOVER_SECONDS", "60"))
 # Kixie's endcall webhook instead (engine.handle_call_ended), which works
 # whatever SMS_AGENT_PROVIDER is.
 CALL_LOG_POLL = _env("SMS_AGENT_CALL_LOG_POLL", "1") not in ("0", "false", "no")
+# Team phones the /canary endpoint may text, comma separated. The canary is
+# the one send that ignores SMS_AGENT_DRY_RUN, so it is limited to numbers the
+# team listed on purpose (a GitHub secret, never a seller). Empty disables it.
+CANARY_NUMBERS = [x.strip() for x in _env("SMS_AGENT_CANARY_NUMBERS", "").split(",") if x.strip()]
 # Recipient-local send window. A bot texting at 11pm is both a compliance
 # problem and the clearest tell that it is a bot.
 QUIET_START_HOUR = int(_env("SMS_AGENT_QUIET_START", "8"))
