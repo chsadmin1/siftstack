@@ -12,6 +12,7 @@ fixed "run"/"health" kinds ftm_schedule.py has.
     python src/p1_manager/schedule.py --once weekly    # run the weekly job now, then exit
     python src/p1_manager/schedule.py --once monthly   # run the monthly job now, then exit
     python src/p1_manager/schedule.py --once enrich    # post the enrichment cost preview now
+    python src/p1_manager/schedule.py --once trestle   # queue unscored Autotext leads now
     python src/p1_manager/schedule.py --next           # print the next 5 fire times
 
 Configuration (all env vars, business-local time, never UTC -- a naive
@@ -27,6 +28,11 @@ schedule drifts by an hour twice a year and fires at the wrong time):
   P1_ENRICH_AT           comma list of HH:MM for the phone-enrichment cost
                          preview, Monday to Friday (default "07:00,12:00";
                          "off" disables it). See enrich.py.
+  P1_TRESTLE_QUEUE       "0" to stop putting unscored Autotext leads on a
+                         "Trestle - MM-DD-YYYY" list before the first
+                         enrichment preview of the day (default on;
+                         P1_AUTOTEXT_TAG names the tag, default "Autotext").
+                         See trestle_queue.py.
   P1_RUN_ON_BOOT         "1" to fire whichever job is soonest once at startup
   P1_JITTER_SECONDS      random 0..N delay before firing (default 0)
 
@@ -196,6 +202,14 @@ def run_enrich() -> None:
     try:
         import enrich
         import slack_app
+        if os.getenv("P1_TRESTLE_QUEUE", "1").strip().lower() not in ("0", "off", "false", "no"):
+            # Before the preview, so today's Trestle list is in this same
+            # preview. Once a day; see trestle_queue.py for why.
+            try:
+                import trestle_queue
+                logger.info("Trestle queue: %s", trestle_queue.run(slack_app.post_to_channel))
+            except Exception:
+                logger.exception("Trestle queue raised, enrichment preview continuing")
         followups = enrich.run_followups(slack_app.reply_in_thread)
         if followups:
             logger.info("Posted %d skip trace follow-up(s)", followups)
@@ -205,12 +219,26 @@ def run_enrich() -> None:
         logger.exception("Enrichment preview raised, scheduler continuing")
 
 
-RUNNERS = {"weekly": run_weekly, "monthly": run_monthly, "enrich": run_enrich}
+def run_trestle() -> None:
+    """Queue unscored Autotext leads now, even if today's run already happened."""
+    if not _slack_ready():
+        logger.warning("SLACK_* not all set -- Trestle queue skipped.")
+        return
+    try:
+        import slack_app
+        import trestle_queue
+        logger.info("Trestle queue: %s", trestle_queue.run(slack_app.post_to_channel, force=True))
+    except Exception:
+        logger.exception("Trestle queue raised")
+
+
+RUNNERS = {"weekly": run_weekly, "monthly": run_monthly, "enrich": run_enrich,
+           "trestle": run_trestle}
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="P1 List Manager scheduler")
-    p.add_argument("--once", choices=["weekly", "monthly", "enrich"],
+    p.add_argument("--once", choices=["weekly", "monthly", "enrich", "trestle"],
                    help="Run one job immediately, then exit")
     p.add_argument("--next", action="store_true", help="Print the next 5 fire times and exit")
     p.add_argument("--verbose", "-v", action="store_true")

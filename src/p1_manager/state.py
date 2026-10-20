@@ -18,6 +18,7 @@ WEEKLY_STATE_FILE = STATE_DIR / "weekly_state.json"
 MONTHLY_SNAPSHOTS_FILE = STATE_DIR / "monthly_snapshots.json"
 PENDING_ASKS_FILE = STATE_DIR / "pending_slack_asks.json"
 ENRICH_STATE_FILE = STATE_DIR / "enrich_state.json"
+TRESTLE_STATE_FILE = STATE_DIR / "trestle_queue.json"
 
 
 def _load(path: Path, default: Any) -> Any:
@@ -80,6 +81,16 @@ def load_enrich_state() -> dict:
 
 def save_enrich_state(data: dict) -> None:
     _save(ENRICH_STATE_FILE, data)
+
+
+# ---- Autotext leads queued for Trestle: last run date + uuid -> date queued ----
+
+def load_trestle_state() -> dict:
+    return _load(TRESTLE_STATE_FILE, {})
+
+
+def save_trestle_state(data: dict) -> None:
+    _save(TRESTLE_STATE_FILE, data)
 
 
 # ---- pending Slack asks: thread_ts -> the batch waiting on a reply ----
