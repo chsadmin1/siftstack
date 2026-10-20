@@ -36,9 +36,16 @@ the stats first and refuses unless value_spent is 0 and the unlimited
 savings counter is positive; the preview tells the team it is account-wide.
 
 Tier tags go on the RECORD (its best phone), matching what the old job
-wrote and what the team filters on. A phone whose Trestle call fails gets no
-score, and a record whose phones all failed gets no tag, rather than a
-misleading "Drop".
+wrote and what the team filters on, AND on each scored PHONE (its own tier,
+2026-10-20). The texting assistant (src/sms_agent) only texts a number whose
+own phone tag is Dial First or Second; with the tier on the record alone, a
+Trestled lead was never texted. Phone tags are written through the owner's
+upsert-phones call, the same one sms_agent/crm.py uses for phone status: it
+REPLACES the phone object, so the whole object is re-sent with only the tier
+tags changed, then read back. A record counts as already scored only when a
+phone carries a tier, so records tiered before this change are rescored once.
+A phone whose Trestle call fails gets no score, and a record whose phones
+all failed gets no tag, rather than a misleading "Drop".
 """
 from __future__ import annotations
 
@@ -120,18 +127,29 @@ def all_lists(client: DataSiftClient) -> list[dict]:
     return [x for x in rows if x.get("uuid")]
 
 
+def _owners(rec: dict) -> list[dict]:
+    return rec.get("owners") or ([rec["owner"]] if isinstance(rec.get("owner"), dict) else [])
+
+
+def _phone_number(p) -> str:
+    return _digits(p.get("phone") or p.get("number") if isinstance(p, dict) else p)
+
+
 def read_record(client: DataSiftClient, uuid: str) -> dict:
-    """{phones, tags, skiptraced} for one record. The list search returns
-    phones empty, so each record is read on its own, as the old d9 job found."""
+    """{phones, tags, phone_tiers, skiptraced} for one record. The list search
+    returns phones empty, so each record is read on its own, as the old d9 job
+    found. phone_tiers = the dial tier tags carried by its phones."""
     rec = client.api(f"/api/internal/property/{uuid}/")
-    owners = rec.get("owners") or ([rec["owner"]] if isinstance(rec.get("owner"), dict) else [])
     phones: list[str] = []
-    for owner in owners:
+    phone_tiers: set[str] = set()
+    for owner in _owners(rec):
         for p in owner.get("phones") or []:
-            num = _digits(p.get("phone") or p.get("number") if isinstance(p, dict) else p)
+            num = _phone_number(p)
             if num and num not in phones:
                 phones.append(num)
-    return {"phones": phones, "tags": _names(rec.get("tags")),
+            if isinstance(p, dict):
+                phone_tiers |= _names(p.get("tags")) & TIER_TAGS
+    return {"phones": phones, "tags": _names(rec.get("tags")), "phone_tiers": phone_tiers,
             "skiptraced": bool(rec.get("skiptraced"))}
 
 
@@ -165,8 +183,8 @@ def collect(client: DataSiftClient, lists: list[dict]) -> dict:
     for u, got in _read_many(client, list(uuids)).items():
         if got is None:
             errors += 1
-        elif got["tags"] & TIER_TAGS:
-            already += 1
+        elif got["phone_tiers"]:
+            already += 1  # a record-level tier alone is not enough; see module doc
         elif got["phones"]:
             records[u] = got["phones"]
         elif got["skiptraced"]:
@@ -356,7 +374,8 @@ def score_records(records: dict[str, list[str]], api_key: str) -> tuple[dict[str
         if got:
             tiers[uuid] = tier_for(max(got))
     failed = sum(1 for v in scores.values() if v is None)
-    return tiers, {"scored": len(unique) - failed, "failed": failed}
+    phone_tiers = {p: tier_for(v) for p, v in scores.items() if v is not None}
+    return tiers, {"scored": len(unique) - failed, "failed": failed, "phone_tiers": phone_tiers}
 
 
 def _tag(client: DataSiftClient, tiers: dict[str, str]) -> dict[str, int]:
@@ -366,6 +385,82 @@ def _tag(client: DataSiftClient, tiers: dict[str, str]) -> dict[str, int]:
     for tier, uuids in by_tier.items():
         client.bulk_add_tags(uuids, [tier])
     return {t: len(by_tier.get(t, [])) for t, _, _ in TIERS}
+
+
+def _phone_payload(p: dict, tier: str) -> dict:
+    """The FULL phone object upsert-phones needs, with its tier tag swapped.
+    Mirrors sms_agent/crm.py _phone_payload: anything left out is wiped."""
+    tags = sorted(_names(p.get("tags") or []))
+    return {
+        "number": _phone_number(p),
+        "type": (p.get("type") or "UNKNOWN").upper(),
+        "tags": [t for t in tags if t not in TIER_TAGS] + [tier],
+        "status": (p.get("status") or "UNKNOWN").upper(),
+        "is_connected": p.get("is_connected", True),
+        "verified": p.get("verified", False),
+    }
+
+
+def _tag_record_phones(client: DataSiftClient, uuid: str,
+                       phone_tiers: dict[str, str]) -> tuple[int, int, int]:
+    """Write each scored phone's own tier on one record, then read it back.
+    Returns (written, verified, failed)."""
+    rec = client.api(f"/api/internal/property/{uuid}/")
+    wanted: dict[str, str] = {}
+    written = failed = 0
+    for owner in _owners(rec):
+        for p in owner.get("phones") or []:
+            num = _phone_number(p) if isinstance(p, dict) else ""
+            tier = phone_tiers.get(num)
+            if not tier:
+                continue
+            wanted[num] = tier
+            if (_names(p.get("tags")) & TIER_TAGS) == {tier}:
+                continue  # already exactly this tier
+            try:
+                client.api(f"/api/internal/owner/{owner.get('uuid')}/upsert-phones/", "POST",
+                           {"phones": [_phone_payload(p, tier)]})
+                written += 1
+            except ApiError as e:
+                failed += 1
+                log.warning("phone tag write failed on %s: %s", uuid, str(e)[:120])
+    if not wanted:
+        return 0, 0, failed
+    after = client.api(f"/api/internal/property/{uuid}/")
+    verified = sum(1 for o in _owners(after) for p in (o.get("phones") or [])
+                   if isinstance(p, dict) and wanted.get(_phone_number(p)) in _names(p.get("tags")))
+    return written, verified, failed
+
+
+def tag_phones(client: DataSiftClient, records: dict[str, list[str]],
+               phone_tiers: dict[str, str]) -> dict[str, int]:
+    """Put each scored number's own tier on it, across `records`."""
+    def _one(u):
+        mine = {p: phone_tiers[p] for p in records[u] if p in phone_tiers}
+        if not mine:
+            return 0, 0, 0, 0
+        try:
+            return (*_tag_record_phones(client, u, mine), len(mine))
+        except ApiError as e:
+            log.warning("could not tag phones on %s: %s", u, str(e)[:120])
+            return 0, 0, len(mine), len(mine)
+
+    totals = {"written": 0, "verified": 0, "failed": 0, "wanted": 0}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for w, v, f, n in ex.map(_one, list(records)):
+            totals["written"] += w
+            totals["verified"] += v
+            totals["failed"] += f
+            totals["wanted"] += n
+    return totals
+
+
+def _phone_tag_line(t: dict) -> str:
+    line = (f"Tagged {t['verified']} of {t['wanted']} numbers with their own tier "
+            "(what auto-texting reads).")
+    if t["verified"] < t["wanted"]:
+        line = ":warning: " + line + " The rest did not stick; check the P1 Manager logs."
+    return line
 
 
 def gate(tiers: dict[str, str], total_with_phones: int, no_phone: int) -> dict:
@@ -417,12 +512,15 @@ def run_enrichment(pending: dict, client: DataSiftClient | None = None) -> str:
     records = pending.get("records", {})
     tiers, stats = score_records(records, api_key) if records else ({}, {"scored": 0, "failed": 0})
     dist = _tag(client, tiers)
+    phone_tags = tag_phones(client, records, stats.get("phone_tiers", {})) if records else None
     pending["tiers"] = tiers
     pending["scored_phones"] = stats["scored"]
     cost = stats["scored"] * PRICE_PER_PHONE
     lines.insert(0, f":telephone_receiver: Scored {stats['scored']} numbers (~${cost:.2f}) and "
                     f"tagged {len(tiers)} records.")
     lines.insert(1, " | ".join(f"{t}: {n}" for t, n in dist.items()))
+    if phone_tags and phone_tags["wanted"]:
+        lines.insert(2, _phone_tag_line(phone_tags))
     if stats["failed"]:
         lines.append(f"{stats['failed']} numbers could not be scored and were left untagged.")
     lines += _gate_lines(pending)
@@ -460,6 +558,7 @@ def check_skip_trace(pending: dict, client: DataSiftClient | None = None,
 
     tiers, stats = score_records(landed, api_key) if landed else ({}, {"scored": 0, "failed": 0})
     dist = _tag(client, tiers)
+    phone_tags = tag_phones(client, landed, stats.get("phone_tiers", {})) if landed else None
     pending.setdefault("records", {}).update(landed)
     pending.setdefault("tiers", {}).update(tiers)
     pending["scored_phones"] = int(pending.get("scored_phones", 0)) + stats["scored"]
@@ -469,6 +568,8 @@ def check_skip_trace(pending: dict, client: DataSiftClient | None = None,
     if landed:
         lines.append(f"Scored {stats['scored']} more numbers (~${stats['scored'] * PRICE_PER_PHONE:.2f}): "
                      + " | ".join(f"{t}: {n}" for t, n in dist.items() if n))
+        if phone_tags and phone_tags["wanted"]:
+            lines.append(_phone_tag_line(phone_tags))
     if still:
         lines.append(f"Still waiting on {len(still)} records; checking again later.")
     elif final and no_hit:

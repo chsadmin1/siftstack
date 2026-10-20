@@ -32,8 +32,19 @@ class FakeClient:
         self.tag_calls = []
         self.stats = {"value_spent": 0.0, "saved_by_unlimited_skiptracing": 511.2}
         self.trace_calls = []
+        self.phone_writes = []
 
     def api(self, path, method="GET", body=None, **_):
+        if path.endswith("/upsert-phones/"):
+            # Replaces the phone object by number, like the real endpoint.
+            for new in body["phones"]:
+                self.phone_writes.append(new)
+                for rec in self.records.values():
+                    for o in rec["owners"]:
+                        for i, old in enumerate(o["phones"]):
+                            if enrich._phone_number(old) == new["number"]:
+                                o["phones"][i] = {**new, "tags": [{"title": t} for t in new["tags"]]}
+            return {}
         if path.startswith("/api/internal/list/"):
             return {"results": self.lists}
         if path == enrich.SKIPTRACE_STATS:
@@ -52,8 +63,11 @@ class FakeClient:
         return len(uuids)
 
 
-def _rec(phones, tags=(), traced=True):
-    return {"owners": [{"phones": [{"phone": p} for p in phones]}],
+def _rec(phones, tags=(), traced=True, phone_tags=None):
+    phone_tags = phone_tags or {}
+    return {"owners": [{"uuid": "o1", "phones": [
+                {"phone": p, "tags": [{"title": t} for t in phone_tags.get(p, [])]}
+                for p in phones]}],
             "tags": [{"name": t} for t in tags], "skiptraced": traced}
 
 
@@ -83,7 +97,7 @@ def _seeded_client():
         "r1": _rec(["(208) 555-0101", "2085550102"]),
         "r2": _rec(["+1 208 555 0101"]),                  # same number as r1: scored once
         "r3": _rec([], traced=False),                      # never traced
-        "r4": _rec(["2085550104"], tags=["Dial Second"]),  # already tiered
+        "r4": _rec(["2085550104"], phone_tags={"2085550104": ["Dial Second"]}),  # already tiered
     }
     return c
 
@@ -135,7 +149,12 @@ def test_approve_scores_tags_by_tier_and_reports_gate():
     assert "Approved" in replies[0] and "skip trace for 1 records" in replies[0], replies
     assert c.trace_calls == [{}]  # the account-wide call, once
     assert c.tag_calls == [(["r1", "r2"], ["Dial First"])], c.tag_calls
+    # The tier also lands on the phone itself, which is what auto-texting reads.
+    r1_phones = {enrich._phone_number(p): enrich._names(p["tags"])
+                 for p in c.records["r1"]["owners"][0]["phones"]}
+    assert r1_phones == {"2085550101": {"Dial First"}, "2085550102": set()}, r1_phones
     summary = replies[1]
+    assert "Tagged 2 of 2 numbers with their own tier" in summary, summary
     assert "Scored 1 numbers" in summary and "tagged 2 records" in summary
     assert "Skip trace started for 1 records" in summary
     assert "1 numbers could not be scored" in summary
@@ -187,7 +206,28 @@ def test_failed_phone_never_becomes_drop():
         tiers, stats = enrich.score_records({"r": ["2085550199"]}, "k")
     finally:
         enrich.trestle_score = orig
-    assert tiers == {} and stats == {"scored": 0, "failed": 1}
+    assert tiers == {} and stats == {"scored": 0, "failed": 1, "phone_tiers": {}}
+
+
+def test_record_level_tier_alone_is_rescored():
+    """Enrichment before 2026-10-20 tagged only the record. The texting
+    assistant reads phone tags, so such a record must be scored again."""
+    c = FakeClient()
+    c.records = {"rA": _rec(["2085550401"], tags=["Dial First"]),
+                 "rB": _rec(["2085550402"], phone_tags={"2085550402": ["Dial Third"]})}
+    c.list_members["LX"] = ["rA", "rB"]
+    out = enrich.collect(c, [{"uuid": "LX", "title": "x"}])
+    assert set(out["records"]) == {"rA"} and out["already_tiered"] == 1, out
+
+
+def test_phone_payload_keeps_everything_but_the_tier():
+    p = {"number": "(208) 555-0501", "type": "mobile", "status": "CORRECT",
+         "is_connected": False, "verified": True,
+         "tags": [{"title": "Litigator"}, {"title": "Dial Fourth"}]}
+    got = enrich._phone_payload(p, "Dial First")
+    assert got == {"number": "2085550501", "type": "MOBILE", "status": "CORRECT",
+                   "is_connected": False, "verified": True,
+                   "tags": ["Litigator", "Dial First"]}, got
 
 
 def test_tiers_and_gate():
