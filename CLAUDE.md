@@ -37,6 +37,8 @@ Deployment is via GitHub Actions (`.github/workflows/deploy-chs-p1-manager.yml`)
 - `SMS_AGENT_RECONCILE_INTERVAL=0` until a captured smrtPhone browser session (`/data/smrtphone_state.json`) is on the volume; that backstop re-reads smrtPhone's SMS log for replies whose webhook was dropped. Set it to `300` once the file is there.
 - The Kixie SMS provider (`kixie.py` send path) stays in the code but is not selected here.
 
+Taking a record out of the `Autotext` preset (removing the tag it filters on) is the off switch: the morning run only picks current members, and `worker.drain_outbox` re-checks membership (`campaign.left_cohort`, one cached sweep per 5 min) before each `seed_touch_*` sends, so that day's queued touches are cancelled too. An unreadable preset holds the touch rather than sending it.
+
 DataSift's own smrtPhone integration logs texts and replies to each record's activity; watch for a double count of `sms_attempts` on the first live send.
 
 `python src/sms_agent/cli.py selftest` runs 289 zero-network checks (section 13 covers the Kixie webhooks); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.

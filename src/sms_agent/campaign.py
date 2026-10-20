@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -47,6 +48,47 @@ log = logging.getLogger(__name__)
 # Where they are in the CALL cadence decides nothing about which text they get;
 # that comes from their own text history in next_touch().
 STAGE_TOUCHES = [(config.CAMPAIGN_PRESET, 0)]
+
+# Leaving the preset is the off switch (Dan, 2026-10-20: "removing the
+# Autotext tag should turn off the texting"). build() only decides who gets a
+# touch at the morning run; the day's batch then drips out over the next hour
+# or so, so the worker re-checks membership right before each touch sends.
+# One bulk sweep serves every send for COHORT_TTL seconds; a failed sweep
+# is remembered as unknown for the same span, so the worker holds rather
+# than hammering a throttled CRM on every pass.
+COHORT_TTL = 300
+_cohort: dict = {"at": 0.0, "uuids": None}
+
+
+def cohort_uuids() -> Optional[set]:
+    """Record uuids in the campaign preset right now, or None when unknown."""
+    if time.monotonic() - _cohort["at"] < COHORT_TTL:
+        return _cohort["uuids"]
+    uuids = None
+    try:
+        must, _matched = crm.resolve_preset(config.CAMPAIGN_PRESET)
+        if must:
+            uuids = {r.get("uuid") for r in crm.fetch_cohort(must) if r.get("uuid")}
+    except Exception as exc:  # noqa: BLE001 - unknown, the caller holds
+        log.warning("could not re-read the %s preset: %s", config.CAMPAIGN_PRESET, exc)
+    _cohort.update(at=time.monotonic(), uuids=uuids)
+    return uuids
+
+
+def left_cohort(phone: str) -> Optional[bool]:
+    """True when this phone's record has left the preset since it was queued.
+
+    None means the preset could not be read, so the caller should hold the
+    text and ask again later. A phone with no mapped record can't be checked
+    and is never blocked here; every other guard still applies to it.
+    """
+    record_uuid = (store.lookup_phone(phone) or {}).get("record_uuid") or ""
+    if not record_uuid:
+        return False
+    uuids = cohort_uuids()
+    if uuids is None:
+        return None
+    return record_uuid not in uuids
 
 
 def _fingerprints() -> dict[int, list[str]]:

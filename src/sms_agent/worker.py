@@ -86,6 +86,23 @@ def drain_outbox(limit: int = 25) -> dict:
             skipped += 1
             continue
 
+        # A campaign touch only goes to someone still in the campaign preset.
+        # Taking the record out of it in DataSift (removing the Autotext tag)
+        # stops the texts that were already queued for today, not just
+        # tomorrow's. Replies to a seller are not campaign touches and still go.
+        if config.CAMPAIGN_ENABLED and (row.get("intent") or "").startswith("seed_touch_"):
+            from . import campaign
+
+            left = campaign.left_cohort(phone)
+            if left is None:
+                held += 1
+                continue
+            if left:
+                store.mark_outbox(row["id"], "cancelled",
+                                  f"left the {config.CAMPAIGN_PRESET} preset")
+                skipped += 1
+                continue
+
         if not sender_pool.within_quiet_hours(phone):
             nb = sender_pool.next_send_window(phone).isoformat(timespec="seconds")
             with store.tx() as c:
