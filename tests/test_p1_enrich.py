@@ -91,7 +91,7 @@ def _seeded_client():
     _reset()
     c = FakeClient()
     enrich.run_preview(lambda t: "ts0", client=c)  # baseline
-    c.lists.append({"uuid": "L2", "title": "Ada Probate Oct"})
+    c.lists.append({"uuid": "L2", "title": "Trestle - 10-20-2026"})
     c.list_members["L2"] = ["r1", "r2", "r3", "r4"]
     c.records = {
         "r1": _rec(["(208) 555-0101", "2085550102"]),
@@ -107,7 +107,7 @@ def test_preview_counts_unique_phones_and_waits_for_approval():
     out = enrich.run_preview(lambda t: posts.append(t) or "ts1", client=c)
     assert out["phones"] == 2 and out["est_cost"] == 0.03, out
     text = posts[-1]
-    assert "Ada Probate Oct" in text and "2 unique numbers" in text and "$0.03" in text
+    assert "Trestle - 10-20-2026" in text and "2 unique numbers" in text and "$0.03" in text
     assert "1 records have never been skip traced" in text and "account" in text
     assert "1 records already have a dial tier" in text
     ask = state.load_pending_asks()["ts1"]
@@ -117,6 +117,19 @@ def test_preview_counts_unique_phones_and_waits_for_approval():
     # The 12 PM run must not offer the same list again while it waits.
     again = enrich.run_preview(lambda t: posts.append(t) or "ts2", client=c)
     assert again == {"new_lists": 0}
+
+
+def test_only_trestle_lists_are_previewed():
+    c, posts = _seeded_client(), []
+    c.lists.append({"uuid": "L3", "title": "Ada Probate Oct"})
+    c.list_members["L3"] = ["r1"]
+    enrich.run_preview(lambda t: posts.append(t) or "ts1", client=c)
+    assert "Ada Probate Oct" not in posts[-1] and "Trestle - 10-20-2026" in posts[-1]
+    assert state.load_enrich_state()["handled"]["L3"]["status"] == "not_trestle"
+    assert set(state.load_pending_asks()["ts1"]["list_uuids"]) == {"L2"}
+    # Asked for by name, any list can still be previewed.
+    enrich.run_preview(lambda t: posts.append(t) or "ts2", client=c, only_titles=["Ada Probate Oct"])
+    assert "Ada Probate Oct" in posts[-1]
 
 
 def test_skip_marks_lists_handled_without_scoring():
