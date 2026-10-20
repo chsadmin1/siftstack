@@ -765,6 +765,53 @@ def run(live_model: bool = False) -> int:
     r.check("nothing was sent into the moved thread", len(stub.sent) == sent_before,
             f"{len(stub.sent) - sent_before} sent")
 
+    # ---- 5c1. leaving the preset stops today's queued touches -------------
+    print("\npreset exit")
+    from . import campaign as _camp2
+
+    saved_campaign = config.CAMPAIGN_ENABLED
+    saved_resolve, saved_fetch = crm.resolve_preset, crm.fetch_cohort
+    config.CAMPAIGN_ENABLED = True
+    crm.resolve_preset = lambda title: ({"stub": True}, title)
+    crm.fetch_cohort = lambda must, limit=0: [{"uuid": "rec-stay"}]
+    try:
+        rows = {}
+        for phone, uuid in (("8650004481", "rec-stay"), ("8650004482", "rec-gone")):
+            store.map_phone(phone, record_uuid=uuid, context=ctx)
+            store.ensure_conversation(phone)
+            rows[uuid] = store.queue_message(phone, "Hi there! touch one", from_number="+18650000001",
+                                             intent="seed_touch_1")
+        _camp2._cohort.update(at=0.0, uuids=None)
+        _w3.drain_outbox(limit=200)
+        r.check("touch cancelled once the record left the preset",
+                store.outbox_status(rows["rec-gone"]) == "cancelled",
+                store.outbox_status(rows["rec-gone"]))
+        r.check("touch still goes to a record in the preset",
+                store.outbox_status(rows["rec-stay"]) in ("queued", "sent"),
+                store.outbox_status(rows["rec-stay"]))
+
+        # An unreadable preset holds the touch; it neither sends nor cancels.
+        def _boom(must, limit=0):
+            raise RuntimeError("throttled")
+        crm.fetch_cohort = _boom
+        store.map_phone("8650004483", record_uuid="rec-unknown", context=ctx)
+        store.ensure_conversation("8650004483")
+        held_id = store.queue_message("8650004483", "Hi there! touch one",
+                                      from_number="+18650000001", intent="seed_touch_1")
+        _camp2._cohort.update(at=0.0, uuids=None)
+        sent_before = len(stub.sent)
+        _w3.drain_outbox(limit=200)
+        r.check("unreadable preset holds the touch",
+                store.outbox_status(held_id) == "queued", store.outbox_status(held_id))
+        r.check("nothing sent while the preset was unreadable",
+                not any(to == "8650004483" for to, _b, _f in stub.sent[sent_before:]))
+    finally:
+        config.CAMPAIGN_ENABLED = saved_campaign
+        crm.resolve_preset, crm.fetch_cohort = saved_resolve, saved_fetch
+        _camp2._cohort.update(at=0.0, uuids=None)
+        for phone in ("8650004481", "8650004483"):
+            store.cancel_queued(phone, "selftest cleanup")
+
     # ---- 5d. resume is the way back -------------------------------------
     print("\nresume")
     from types import SimpleNamespace
