@@ -11,7 +11,10 @@ DataSift credentials and a Slack listener:
 
   1. PREVIEW (weekdays, P1_ENRICH_AT, default 07:00 and 12:00 Mountain):
      find lists created since the watcher started that have not been
-     handled, read every record on them, skip records that already carry a
+     handled and whose title starts with ONLY_PREFIX ("Trestle - ", the
+     lists trestle_queue.py makes for Autotext leads; Dan, 2026-10-20: other
+     new lists are not scored). Any other new list is marked handled
+     ("not_trestle") so it never comes back. Read every record on them, skip records that already carry a
      dial tier tag, count the phone numbers left to score and the records
      that have never been skip traced. Post the estimate to the P1 channel
      and remember the batch under the message's ts. Nothing is charged.
@@ -86,6 +89,10 @@ SKIPTRACE_GIVE_UP_HOURS = int(os.getenv("P1_SKIPTRACE_GIVE_UP_HOURS", "48"))
 # most records have a phone and enough of them have a top-tier number.
 GATE_PHONE_COVERAGE = 0.70
 GATE_TOP_TIER_MIN = 18
+
+# Only lists whose title starts with this get a preview. "" = every new list
+# (the behaviour before 2026-10-20). `only=` on /trigger/enrich ignores it.
+ONLY_PREFIX = os.getenv("P1_ENRICH_ONLY_PREFIX", "Trestle - ")
 
 APPROVE_WORDS = ("approve", "approved", "yes", "go", "run it")
 SKIP_WORDS = ("skip", "no", "cancel", "don't", "dont")
@@ -224,7 +231,14 @@ def new_lists(client: DataSiftClient) -> tuple[list[dict], bool]:
     in_flight = {u for ask in state.load_pending_asks().values()
                  if ask.get("kind") == "enrich" and ask.get("status") == "pending"
                  for u in ask.get("list_uuids", [])}
-    return [x for x in lists if x["uuid"] not in handled and x["uuid"] not in in_flight], False
+    fresh = [x for x in lists if x["uuid"] not in handled and x["uuid"] not in in_flight]
+    if ONLY_PREFIX:
+        other = [x for x in fresh if not (x.get("title") or "").startswith(ONLY_PREFIX)]
+        if other:
+            _mark([x["uuid"] for x in other], {x["uuid"]: x.get("title", "") for x in other},
+                  "not_trestle")
+        fresh = [x for x in fresh if (x.get("title") or "").startswith(ONLY_PREFIX)]
+    return fresh, False
 
 
 def _mark(list_uuids: list[str], titles: dict[str, str], status: str) -> None:
@@ -282,7 +296,7 @@ def run_preview(post, client: DataSiftClient | None = None,
     if seeded:
         n = len(state.load_enrich_state().get("handled", {}))
         post(f":information_source: Phone enrichment watcher is on. The {n} lists already in "
-             "DataSift are treated as handled; lists created from now on get a cost preview here "
+             "DataSift are treated as handled; new Trestle lists get a cost preview here "
              "at 7 AM and 12 PM on weekdays.")
         return {"seeded": n}
     if not lists:
