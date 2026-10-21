@@ -26,6 +26,29 @@ log = logging.getLogger("p1_routing")
 AUTO_BOARD = os.getenv("P1_AUTO_BOARD", "Raw")
 
 
+def replace_owners() -> bool:
+    """P1 pulls swap in DataSift's current owner (Dan, 2026-10-21), unlike the
+    upstream doctrine of never overwriting owners. P1_REPLACE_OWNERS=0 = off."""
+    return os.getenv("P1_REPLACE_OWNERS", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def ensure_replace_owners(client: DataSiftClient, details: dict) -> list[str]:
+    """Turn "swap owners" on for every P1 preset that has it off. `details` is
+    preset name -> preset detail (as weekly.run already fetched). Returns the
+    names changed. Only that one field is sent, never filter_data."""
+    changed = []
+    for name, d in details.items():
+        if d.get("id") is None or d.get("replace_owners_enabled"):
+            continue
+        try:
+            client.update_preset(d["id"], replace_owners_enabled=True)
+            d["replace_owners_enabled"] = True
+            changed.append(name)
+        except ApiError as e:
+            log.warning("could not turn on swap owners for %s: %s", name, str(e)[:120])
+    return changed
+
+
 def enabled() -> bool:
     return os.getenv("P1_AUTO_ROUTE", "1").strip().lower() not in ("0", "off", "false", "no")
 

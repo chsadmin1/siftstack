@@ -333,14 +333,15 @@ def run_preview(post, client: DataSiftClient | None = None,
             "needs_trace": len(c["needs_trace"]), "ts": ts}
 
 
-def post_batch_preview(post, client: DataSiftClient, list_uuid: str, title: str,
-                       uuids: list[str], header: str) -> str | None:
+def post_batch_preview(post, client: DataSiftClient, uuids: list[str], header: str,
+                       list_uuid: str = "", title: str = "") -> str | None:
     """Preview exactly these records, under `header`, as one approvable post.
 
     The Trestle queue calls this the moment it adds Autotext leads to a list,
-    so the team sees why and can approve in the same message instead of
-    waiting for the next scheduled scan. Returns the thread ts, or None when
-    nothing needs scoring or the post failed."""
+    and the daily P1 run calls it for that day's new records (no list), so
+    the team can approve in the same message instead of waiting for the next
+    scheduled scan. Returns the thread ts, or None when nothing needs scoring
+    or the post failed."""
     c = collect_records(client, uuids)
     if not c["records"] and not c["needs_trace"]:
         return None
@@ -364,12 +365,22 @@ def post_batch_preview(post, client: DataSiftClient, list_uuid: str, title: str,
         return None
     state.save_pending_ask(ts, {
         "kind": "enrich", "status": "pending",
-        "list_uuids": [list_uuid], "list_titles": {list_uuid: title},
+        "list_uuids": [list_uuid] if list_uuid else [],
+        "list_titles": {list_uuid: title} if list_uuid else {},
         "records": c["records"], "needs_trace": c["needs_trace"],
         "phones": c["phones"], "est_cost": c["est_cost"],
         "no_hit": c["no_hit"], "created": _now(),
     })
     return ts
+
+
+def preview_new_p1(post, client: DataSiftClient, uuids: list[str]) -> str | None:
+    """The daily P1 run's offer (Dan, 2026-10-21): score today's new P1
+    records' phones with Trestle, only if someone replies approve."""
+    header = (f":telephone_receiver: *Phone scoring for today's {len(uuids)} new P1 record(s)*: "
+              "their owner and property details were refreshed from DataSift when they were "
+              "pulled in. Want their phone numbers run through Trestle?")
+    return post_batch_preview(post, client, uuids, header)
 
 
 # ---------------------------------------------------------------- skip trace

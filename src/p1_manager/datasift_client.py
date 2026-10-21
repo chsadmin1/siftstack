@@ -174,10 +174,13 @@ class DataSiftClient:
 
     def create_preset(self, name: str, *, filters: dict, address: dict,
                        lists: list | None = None, tags: list | None = None,
-                       auto_add_enabled: bool = True, description: str = "") -> dict:
+                       auto_add_enabled: bool = True, description: str = "",
+                       replace_owners: bool = True) -> dict:
         return self.map_call("/filters/", "POST", {
             "name": name, "description": description,
-            "auto_add_enabled": auto_add_enabled, "replace_owners_enabled": False,
+            # "Swap owners" (Dan, 2026-10-21): records pulled in by this
+            # preset take DataSift's current owner and property details.
+            "auto_add_enabled": auto_add_enabled, "replace_owners_enabled": replace_owners,
             "lists": lists or [], "tags": tags or [],
             "filter_data": {"filters": filters, "addresses": [address]},
         })

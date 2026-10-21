@@ -525,8 +525,11 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
             # the shared cursor the real unscoped Saturday run relies on
             # (caught live 2026-09-23: a broken scoped attempt advanced the
             # cursor anyway and starved the very next retry's time window).
+            import enrich
+            phone_preview = ((lambda c, uuids: enrich.preview_new_p1(post_to_channel, c, uuids))
+                             if post_slack else None)
             weekly.run(commit=commit, post_slack=post_slack, only_presets=names,
-                      update_cursor=(names is None))
+                      update_cursor=(names is None), phone_preview=phone_preview)
         else:
             import monthly
             result = monthly.run(commit=commit)
