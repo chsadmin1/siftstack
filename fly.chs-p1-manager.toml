@@ -23,8 +23,9 @@ primary_region = 'iad'
   # (Was America/New_York, which ran the Saturday job at 6 AM Mountain.)
   P1_TIMEZONE = 'America/Boise'
   # New P1 records are checked and put on Raw / <county> every day at 6 AM
-  # (Dan, 2026-10-21), not just Saturdays.
-  P1_WEEKLY_AT = '06:00'
+  # EASTERN (Dan, 2026-10-21) = 04:00 here: Boise and New York change for
+  # daylight saving on the same dates, so the two stay 2 hours apart.
+  P1_WEEKLY_AT = '04:00'
   P1_WEEKLY_DAY = 'daily'
   P1_MONTHLY_AT = '08:00'
   P1_MONTHLY_DAY = '28'
