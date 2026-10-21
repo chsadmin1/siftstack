@@ -4,20 +4,24 @@ The texting assistant (src/sms_agent) only texts a number whose OWN phone tag
 is Dial First or Dial Second. A record tagged Autotext whose phones were never
 scored sits in the Autotext preset and is never texted, with nothing saying
 why. Dan, 2026-10-20: put those records on a dated Trestle list and tell the
-P1 channel they need to be Trestled to be auto-texted.
+P1 channel they need to be Trestled to be auto-texted. Dan, 2026-10-21: as
+soon as they're tagged, not on a schedule.
 
-Runs at the first enrichment slot of each weekday, right BEFORE the
-enrichment preview (schedule.run_enrich), so the new list is picked up by
-that same preview and its cost estimate posts a few seconds after the notice.
-Once a day only: a list created at 7 AM is marked handled by the 7 AM preview,
-so records added to it at noon would never be previewed. Leads tagged after
-the morning run are caught the next weekday.
+So a watcher thread (watch_forever, started by slack_app) sweeps every
+POLL_MINUTES during ACTIVE_HOURS. Each sweep is one paged search for the
+Autotext tag; only records it has not looked at recently are read. When a
+sweep finds leads that need scoring it adds them to today's Trestle list and
+posts ONE message to the P1 channel: why they're there plus the cost
+preview, approvable in that thread (enrich.post_batch_preview). The list is
+marked handled for the scheduled enrichment scan so it is never previewed
+twice; the scan itself only looks at Trestle lists (enrich.ONLY_PREFIX), so
+other new lists are never scored.
 
 Which records go on the list ("needs scoring"):
   * a record with phones where NO phone carries any dial tier tag, and
   * a record with no phones that has never been skip traced (approving the
-    enrichment preview starts DataSift's skip trace for it).
-Left off, and only counted in the notice:
+    preview starts DataSift's skip trace for it).
+Left off, and only counted in the message:
   * phones already scored Dial Third / Dial Fourth / Drop: Trestle already
     answered, and scoring the same number again costs money and changes
     nothing;
@@ -25,21 +29,24 @@ Left off, and only counted in the notice:
     prospecting, not Trestle.
 A record whose tier tag is only on the RECORD (enrichment before 2026-10-20
 tagged records, not phones) counts as unscored, because the texting
-assistant cannot see a record-level tier. enrich.collect agrees, so those
-records are rescored and their phones tagged.
+assistant cannot see a record-level tier.
 
-A record already queued in the last REQUEUE_DAYS is not added again, so an
-unapproved list does not grow a new copy every morning.
+What a sweep remembers ("seen": uuid -> verdict + date): a record queued for
+scoring is not looked at again for REQUEUE_DAYS, so an unapproved batch is
+not re-posted; any other verdict is re-checked once a day, which is how a
+record that gains a phone or loses its tier is noticed.
 """
 from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import enrich
 import state
 from datasift_client import ApiError, DataSiftClient
 
@@ -48,14 +55,18 @@ log = logging.getLogger("p1_trestle_queue")
 AUTOTEXT_TAG = os.getenv("P1_AUTOTEXT_TAG", "Autotext")
 LIST_PREFIX = "Trestle - "
 REQUEUE_DAYS = int(os.getenv("P1_TRESTLE_REQUEUE_DAYS", "7"))
+RECHECK_DAYS = 1
+POLL_MINUTES = float(os.getenv("P1_TRESTLE_POLL_MINUTES", "5"))
+ACTIVE_HOURS = os.getenv("P1_TRESTLE_HOURS", "07:00-20:00")
 TEXTABLE_TIERS = {"Dial First", "Dial Second"}
 TIER_TAGS = {"Dial First", "Dial Second", "Dial Third", "Dial Fourth", "Drop"}
 ADD_SLEEP = 0.25  # per record add-lists call, same pacing as dispo_flow
 
+_sweep_lock = threading.Lock()
 
-def _today() -> date:
-    tz = ZoneInfo(os.getenv("P1_TIMEZONE", "America/New_York"))
-    return datetime.now(tz).date()
+
+def _tz() -> ZoneInfo:
+    return ZoneInfo(os.getenv("P1_TIMEZONE", "America/New_York"))
 
 
 def list_title(day: date) -> str:
@@ -133,96 +144,145 @@ def _add_to_list(client: DataSiftClient, uuids: list[str], title: str) -> tuple[
     return added, failed
 
 
-def notice_text(title: str, added: int, counts: dict) -> str:
+def header_text(title: str, added: int, counts: dict) -> str:
     lines = [
         f":iphone: *Auto-texting needs phone scores*: {added} lead(s) tagged {AUTOTEXT_TAG} "
         "have no Dial First or Dial Second number yet, so the texting assistant can't text them.",
-        f"They're on the DataSift list *{title}*. They need to be Trestled to take advantage of "
-        "auto-texting: reply *approve* to the phone enrichment preview for that list, which "
-        "posts here next.",
+        f"They're on the DataSift list *{title}* and need to be Trestled to take advantage of "
+        "auto-texting.",
     ]
     extra = []
     if counts.get("low_tier"):
-        extra.append(f"{counts['low_tier']} were already scored Dial Third or lower, so they "
-                     "won't be texted and weren't added")
+        extra.append(f"{counts['low_tier']} newly tagged were already scored Dial Third or "
+                     "lower, so they won't be texted and weren't added")
     if counts.get("no_phone"):
         extra.append(f"{counts['no_phone']} have no phone even after a skip trace and need "
                      "deep prospecting")
-    if counts.get("recently_queued"):
-        extra.append(f"{counts['recently_queued']} are already waiting on an earlier Trestle list")
     if counts.get("read_error"):
-        extra.append(f"{counts['read_error']} records couldn't be read and were left out")
+        extra.append(f"{counts['read_error']} records couldn't be read and will be retried")
     if counts.get("add_failed"):
-        extra.append(f"{counts['add_failed']} couldn't be added to the list and will be "
-                     "retried tomorrow")
+        extra.append(f"{counts['add_failed']} couldn't be added to the list and will be retried")
     if extra:
         lines.append("_" + "; ".join(extra) + "._")
     return "\n".join(lines)
 
 
-def run(post, client: DataSiftClient | None = None, today: date | None = None,
-        commit: bool = True, force: bool = False) -> dict:
-    """Queue today's Autotext leads that need scoring. `post(text) -> ts`.
+def _due(entry: dict | None, today: date) -> bool:
+    if not entry:
+        return True
+    try:
+        last = date.fromisoformat(entry.get("d", ""))
+    except ValueError:
+        return True
+    wait = REQUEUE_DAYS if entry.get("v") == "needs_scoring" else RECHECK_DAYS
+    return (today - last).days >= wait
 
-    Once per day unless `force`. Posts nothing when no lead needs scoring."""
-    today = today or _today()
+
+def sweep(post, client: DataSiftClient | None = None, today: date | None = None,
+          commit: bool = True) -> dict:
+    """One pass: queue and announce Autotext leads that need scoring.
+
+    `post(text) -> ts`. Posts only when something was queued, or once a day
+    when the Autotext tag can't be found."""
+    with _sweep_lock:
+        return _sweep(post, client, today or datetime.now(_tz()).date(), commit)
+
+
+def _sweep(post, client, today: date, commit: bool) -> dict:
     st = state.load_trestle_state()
-    if not force and st.get("last_run") == today.isoformat():
-        return {"skipped": "already ran today"}
-
     client = client or DataSiftClient.from_env()
     uuid = tag_uuid(client, AUTOTEXT_TAG)
     if not uuid:
-        if commit:
-            st["last_run"] = today.isoformat()
+        if commit and st.get("warned") != today.isoformat():
+            st["warned"] = today.isoformat()
             state.save_trestle_state(st)
-        post(f":warning: Couldn't find a DataSift tag named *{AUTOTEXT_TAG}*, so no Autotext "
-             "leads were checked for phone scores today.")
+            post(f":warning: Couldn't find a DataSift tag named *{AUTOTEXT_TAG}*, so Autotext "
+                 "leads can't be checked for phone scores.")
         return {"error": f"tag {AUTOTEXT_TAG!r} not found"}
 
     records = [r.get("uuid") or r.get("saved_uuid")
                for r in client.search_properties({"any_tags": [uuid]})
                if r.get("uuid") or r.get("saved_uuid")]
-    verdicts = _classify_many(client, records)
+    seen = st.get("seen", {})
+    check = [u for u in records if _due(seen.get(u), today)]
+    if not check:
+        return {"autotext": len(records), "checked": 0}
+
+    first_look = {u for u in check if u not in seen}
+    verdicts = _classify_many(client, check)
     counts: dict[str, int] = {}
-    for v in verdicts.values():
+    for u, v in verdicts.items():
+        # Low tier / no phone are only worth saying once, for newly tagged
+        # leads; read errors are said whenever they happen.
+        if v in ("low_tier", "no_phone") and u not in first_look:
+            continue
         counts[v] = counts.get(v, 0) + 1
-
-    queued = st.get("queued", {})
-    cutoff = (today - timedelta(days=REQUEUE_DAYS)).isoformat()
-    queued = {u: d for u, d in queued.items() if d > cutoff}  # forget old entries
     need = [u for u, v in verdicts.items() if v == "needs_scoring"]
-    fresh = [u for u in need if u not in queued]
-    counts["recently_queued"] = len(need) - len(fresh)
     title = list_title(today)
-    result = {"autotext": len(records), "needs_scoring": len(need), "to_add": len(fresh),
-              "list": title, **{k: v for k, v in counts.items() if k != "needs_scoring"}}
-
+    result = {"autotext": len(records), "checked": len(check), "list": title,
+              "to_add": len(need), **counts}
     if not commit:
-        log.info("trestle queue (dry run): %s", result)
         return result
 
-    st["last_run"] = today.isoformat()
-    if not fresh:
-        st["queued"] = queued
+    stamp = today.isoformat()
+    for u, v in verdicts.items():
+        if v not in ("read_error", "needs_scoring"):
+            seen[u] = {"v": v, "d": stamp}
+    st["seen"] = seen
+    if not need:
         state.save_trestle_state(st)
-        log.info("trestle queue: nothing new to score (%s)", result)
         return result
 
     list_uuid = _ensure_list(client, title)
     if not list_uuid:
         state.save_trestle_state(st)
-        post(f":warning: Couldn't create the DataSift list *{title}*; {len(fresh)} Autotext "
-             "leads still need phone scores.")
+        log.warning("could not create list %s; %d leads retried next sweep", title, len(need))
         return {**result, "error": "list not created"}
+    # Before anything else can look: the scheduled scan must not preview it too.
+    enrich.mark_handled(list_uuid, title, "trestle_queue")
 
-    added, failed = _add_to_list(client, fresh, title)
-    stamp = today.isoformat()
-    queued.update({u: stamp for u in added})
-    st["queued"] = queued
+    added, failed = _add_to_list(client, need, title)
+    for u in added:
+        seen[u] = {"v": "needs_scoring", "d": stamp}
     state.save_trestle_state(st)
     if failed:
         counts["add_failed"] = failed
-    if added:
-        post(notice_text(title, len(added), counts))
-    return {**result, "added": len(added), "failed": failed}
+    if not added:
+        return {**result, "added": 0, "failed": failed}
+
+    header = header_text(title, len(added), counts)
+    ts = enrich.post_batch_preview(post, client, list_uuid, title, added, header)
+    if not ts:
+        post(header)  # nothing scoreable after all, or the preview post failed
+    return {**result, "added": len(added), "failed": failed, "ts": ts}
+
+
+def _active(now: datetime) -> bool:
+    try:
+        start, end = (datetime.strptime(x.strip(), "%H:%M").time()
+                      for x in ACTIVE_HOURS.split("-"))
+    except ValueError:
+        return True
+    return start <= now.time() < end
+
+
+def watch_forever(post) -> None:
+    """The watcher thread: sweep every POLL_MINUTES during ACTIVE_HOURS."""
+    log.info("Trestle watcher up: every %s min, %s %s", POLL_MINUTES, ACTIVE_HOURS,
+             os.getenv("P1_TIMEZONE", "America/New_York"))
+    while True:
+        if _active(datetime.now(_tz())):
+            try:
+                result = sweep(post)
+                if result.get("added") or result.get("error"):
+                    log.info("Trestle sweep: %s", result)
+            except Exception:
+                log.exception("Trestle sweep raised, watcher continuing")
+        time.sleep(POLL_MINUTES * 60)
+
+
+def start_watcher(post) -> threading.Thread:
+    t = threading.Thread(target=watch_forever, args=(post,), daemon=True,
+                         name="p1-trestle-watcher")
+    t.start()
+    return t
