@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import playbook as pb
 import state
+import routing
 import tags as tagmod
 from datasift_client import DataSiftClient
 from weekly import WORLD, p1_presets, search_preset  # reuse, don't duplicate
@@ -131,7 +132,8 @@ def create_presets_for_new_combos(client: DataSiftClient, county: str, state_abb
             continue
         address = pb.county_address(fips, county, state_abbr, rich=True)
         created = client.create_preset(name, filters=filters, address=address,
-                                        tags=["P1", name])
+                                        tags=["P1", name],
+                                        replace_owners=routing.replace_owners())
         readback = client.get_preset(created["id"])
         ok = readback.get("filter_data", {}).get("filters") == filters
         report.append({"label": label, "name": name,
@@ -168,7 +170,7 @@ def full_repull_and_tag(client: DataSiftClient, presets: list[dict], *,
             addr_thin = dict(addr, search=addr["county"], type="county")
             client.map_call("/properties/add-properties-by-query/", "POST", {
                 "auto_add_enabled": False, "lists": [], "tags": ["P1", p["name"]],
-                "replace_owners": False,
+                "replace_owners": routing.replace_owners(),
                 "query": {"result_index": 1, "with_boundaries": False,
                           "filters": detail["filter_data"]["filters"],
                           "addresses": [addr_thin], "polygon": WORLD}})

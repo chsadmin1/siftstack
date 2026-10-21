@@ -46,11 +46,18 @@ class FakeClient:
         self.cards = {"p-moved": [{"board": {"uuid": "b-raw"}, "column": {"uuid": "c-follow"}}]}
         self.created = []
         self.deleted = []
+        self.preset_updates = []
+        self.presets[2]["replace_owners_enabled"] = True  # already on
         self.cols = {"b-lm": [{"uuid": "c-nc", "title": "No Contact"},
                               {"uuid": "c-new", "title": "New Lead"}],
                      "b-raw": [{"uuid": "c-canyon", "title": "Canyon"},
                                {"uuid": "c-ada", "name": "Ada"},
                                {"uuid": "c-follow", "title": "Follow Up"}]}
+
+    def update_preset(self, pid, **fields):
+        self.preset_updates.append((pid, fields))
+        self.presets[pid].update(fields)
+        return self.presets[pid]
 
     def list_presets(self):
         return [{"id": p["id"], "name": p["name"]} for p in self.presets.values()]
@@ -182,6 +189,57 @@ def test_reply_moves_the_batch_off_raw():
     assert "Moved 1 card(s) from *RAW / Ada* to *Lead Management / No Contact*" in sent[0], sent
     assert "2 were in another Raw phase and were left there" in sent[0]
     assert sent[1].startswith(":white_check_mark: Added 3 card(s) to *Lead Management / New Lead*")
+
+
+def test_daily_run_turns_on_swap_owners_and_offers_trestle():
+    c = FakeClient()
+    offers = []
+    orig = weekly.DataSiftClient.from_env
+    weekly.DataSiftClient.from_env = classmethod(lambda cls: c)
+    try:
+        out = weekly.run(post_slack=lambda name, rows, routed: "ts", update_cursor=False,
+                         phone_preview=lambda client, uuids: offers.append(uuids) or "ts-phone")
+    finally:
+        weekly.DataSiftClient.from_env = orig
+    # Only the preset that had it off is changed, and only that one field.
+    assert c.preset_updates == [(1, {"replace_owners_enabled": True})], c.preset_updates
+    assert out["swap_owners_turned_on"] == [c.presets[1]["name"]]
+    # One offer for the whole run, every new record once.
+    assert offers == [["p-nampa", "p-a1", "p-a2", "p-moved"]], offers
+    assert out["phone_offer_ts"] == "ts-phone"
+
+
+def test_swap_owners_can_be_turned_off():
+    c = FakeClient()
+    os.environ["P1_REPLACE_OWNERS"] = "0"
+    orig = weekly.DataSiftClient.from_env
+    weekly.DataSiftClient.from_env = classmethod(lambda cls: c)
+    try:
+        weekly.run(post_slack=None, update_cursor=False)
+    finally:
+        weekly.DataSiftClient.from_env = orig
+        del os.environ["P1_REPLACE_OWNERS"]
+    assert c.preset_updates == []
+
+
+def test_trestle_offer_for_new_p1_records():
+    import enrich
+
+    class C:
+        def api(self, path, *a, **k):
+            u = path.rstrip("/").rsplit("/", 1)[-1]
+            return {"p-1": {"owner": {"phones": [{"number": "2085550101"}]}, "skiptraced": True},
+                    "p-2": {"owner": {"phones": []}, "skiptraced": False},
+                    "p-3": {"owner": {"phones": [{"number": "2085550103",
+                                                  "tags": [{"title": "Dial First"}]}]}}}[u]
+
+    posts = []
+    ts = enrich.preview_new_p1(lambda t: posts.append(t) or "ts-x", C(), ["p-1", "p-2", "p-3"])
+    assert ts == "ts-x" and "today's 3 new P1 record(s)" in posts[0]
+    assert "refreshed from DataSift" in posts[0] and "approve" in posts[0]
+    ask = state.load_pending_asks()["ts-x"]
+    assert ask["kind"] == "enrich" and ask["list_uuids"] == []
+    assert set(ask["records"]) == {"p-1"} and ask["needs_trace"] == ["p-2"]  # p-3 already scored
 
 
 def test_daily_schedule():

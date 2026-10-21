@@ -83,7 +83,7 @@ def find_new_for_preset(client: DataSiftClient, preset_summary: dict, since: dat
 
 def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
         post_slack=None, only_presets: list[str] | None = None,
-        update_cursor: bool = True) -> dict:
+        update_cursor: bool = True, phone_preview=None) -> dict:
     """post_slack(preset_name, new_rows, routed) -> thread_ts, or None to skip posting
     (routed = routing.route()'s result, or None when auto-routing is off)
     (e.g. in --dry-run). Kept as an injectable callback so this module has no
@@ -92,7 +92,10 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
     only_presets: exact preset names to limit this run to (e.g. for a small
     live test rather than the full account sweep). update_cursor: False keeps
     a scoped test run from advancing the shared "since" cursor that the real
-    scheduled run relies on."""
+    scheduled run relies on.
+
+    phone_preview(client, uuids): offers Trestle scoring for all of this run's
+    new records in one approvable Slack post (enrich.preview_new_p1)."""
     client = DataSiftClient.from_env()
     weekly_state = state.load_weekly_state()
     now = datetime.now(timezone.utc)
@@ -119,6 +122,13 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
         if new_rows:
             per_preset[p["name"]] = new_rows
             log.info("  %s: %d new", p["name"], len(new_rows))
+
+    # Swap owners on every scanned P1 preset, so each auto-add from now on
+    # takes DataSift's current owner and property details.
+    swapped = (routing.ensure_replace_owners(client, details)
+               if commit and routing.replace_owners() else [])
+    if swapped:
+        log.info("Turned on swap owners for %d P1 preset(s): %s", len(swapped), swapped)
 
     results = {}
     for preset_name, rows in per_preset.items():
@@ -148,12 +158,20 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
         results[preset_name] = {"new_count": len(rows), "backfilled_p1": len(missing_p1),
                                 "routed": routed}
 
+    new_uuids = list(dict.fromkeys(r["saved_uuid"] for rows in per_preset.values() for r in rows))
+    phone_ts = None
+    if commit and phone_preview and new_uuids:
+        try:
+            phone_ts = phone_preview(client, new_uuids)
+        except Exception:  # noqa: BLE001 -- the offer must never sink the run
+            log.exception("phone scoring offer failed")
+
     if commit and update_cursor:
         weekly_state["last_run_iso"] = _iso(now)
         state.save_weekly_state(weekly_state)
 
     return {"since": _iso(since), "presets_with_new_records": len(per_preset),
-            "detail": results}
+            "detail": results, "swap_owners_turned_on": swapped, "phone_offer_ts": phone_ts}
 
 
 if __name__ == "__main__":

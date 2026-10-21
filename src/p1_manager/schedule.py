@@ -168,17 +168,20 @@ def run_weekly() -> None:
     next slot on schedule regardless."""
     dry = os.getenv("P1_WEEKLY_DRY_RUN", "0").strip() in ("1", "true", "yes", "on")
     logger.info("Firing weekly job (commit=%s)", not dry)
-    post_slack = None
+    post_slack = phone_preview = None
     if not dry and _slack_ready():
+        import enrich
         import slack_app
         post_slack = slack_app.post_weekly_ask
+        phone_preview = lambda c, uuids: enrich.preview_new_p1(  # noqa: E731
+            slack_app.post_to_channel, c, uuids)
     elif not dry:
         logger.warning("SLACK_BOT_TOKEN/SLACK_SIGNING_SECRET/SLACK_CHANNEL_ID not "
                         "all set -- this run will scan and tag-backfill new P1 "
                         "records but will NOT post/ask about SiftLine board+phase.")
     started = time.time()
     try:
-        result = weekly.run(commit=not dry, post_slack=post_slack)
+        result = weekly.run(commit=not dry, post_slack=post_slack, phone_preview=phone_preview)
         logger.info("Weekly job finished in %.0fs: %s",
                     time.time() - started, result)
     except Exception:

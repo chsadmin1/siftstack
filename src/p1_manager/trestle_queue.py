@@ -251,7 +251,7 @@ def _sweep(post, client, today: date, commit: bool) -> dict:
         return {**result, "added": 0, "failed": failed}
 
     header = header_text(title, len(added), counts)
-    ts = enrich.post_batch_preview(post, client, list_uuid, title, added, header)
+    ts = enrich.post_batch_preview(post, client, added, header, list_uuid=list_uuid, title=title)
     if not ts:
         post(header)  # nothing scoreable after all, or the preview post failed
     return {**result, "added": len(added), "failed": failed, "ts": ts}
