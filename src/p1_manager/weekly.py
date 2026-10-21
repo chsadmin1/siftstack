@@ -1,5 +1,6 @@
 """Saturday job: find records newly added to P1 presets this past week, tag
-them, and ask (via Slack) whether/where they go on a SiftLine board+phase.
+them, put them on the county's Raw board phase (routing.py), and post where
+they went to Slack, where a reply can add them to another board+phase too.
 
 THE KEY DISCOVERY (verified live 2026-09-22) that shapes this whole module:
 map.reisift.io's own POST /properties/search/ result rows already carry
@@ -28,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import routing
 import state
 import tags as tagmod
 from datasift_client import DataSiftClient
@@ -60,8 +62,11 @@ def search_preset(client: DataSiftClient, preset_detail: dict) -> list[dict]:
     return r.get("results") or r.get("data") or []
 
 
-def find_new_for_preset(client: DataSiftClient, preset_summary: dict, since: datetime) -> list[dict]:
+def find_new_for_preset(client: DataSiftClient, preset_summary: dict, since: datetime,
+                        details: dict | None = None) -> list[dict]:
     detail = client.get_preset(preset_summary["id"])
+    if details is not None:
+        details[preset_summary["name"]] = detail
     rows = search_preset(client, detail)
     out = []
     for row in rows:
@@ -79,7 +84,8 @@ def find_new_for_preset(client: DataSiftClient, preset_summary: dict, since: dat
 def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
         post_slack=None, only_presets: list[str] | None = None,
         update_cursor: bool = True) -> dict:
-    """post_slack(preset_name, new_rows) -> thread_ts, or None to skip posting
+    """post_slack(preset_name, new_rows, routed) -> thread_ts, or None to skip posting
+    (routed = routing.route()'s result, or None when auto-routing is off)
     (e.g. in --dry-run). Kept as an injectable callback so this module has no
     hard Slack import until slack_app.py exists.
 
@@ -103,9 +109,10 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
     log.info("Scanning %d P1 presets for records saved since %s", len(presets), _iso(since))
 
     per_preset: dict[str, list[dict]] = {}
+    details: dict[str, dict] = {}
     for p in presets:
         try:
-            new_rows = find_new_for_preset(client, p, since)
+            new_rows = find_new_for_preset(client, p, since, details)
         except Exception as exc:  # noqa: BLE001 -- one bad preset should not kill the run
             log.warning("  %s: skipped (%s)", p["name"], exc)
             continue
@@ -120,15 +127,22 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
         if commit:
             if missing_p1:
                 tagmod.backfill_missing_p1(client, missing_p1)
-            thread_ts = post_slack(preset_name, rows) if post_slack else None
+            # Straight onto Raw / <county> (routing.py); the Slack post then
+            # says where they went instead of asking.
+            routed = (routing.route(client, details.get(preset_name, {}), uuids)
+                      if routing.enabled() else None)
+            thread_ts = post_slack(preset_name, rows, routed) if post_slack else None
             if thread_ts:
-                state.save_pending_ask(thread_ts, {
-                    "preset_name": preset_name,
-                    "property_uuids": uuids,
-                    "count": len(uuids),
-                    "since": _iso(since),
-                })
-        results[preset_name] = {"new_count": len(rows), "backfilled_p1": len(missing_p1)}
+                ask = {"preset_name": preset_name, "property_uuids": uuids,
+                       "count": len(uuids), "since": _iso(since)}
+                if routed and routed.get("column_uuid"):
+                    # A later reply naming the same board+phase is a no-op.
+                    ask["resolved_targets"] = [f"{routed['board_uuid']}/{routed['column_uuid']}"]
+                state.save_pending_ask(thread_ts, ask)
+        else:
+            routed = None
+        results[preset_name] = {"new_count": len(rows), "backfilled_p1": len(missing_p1),
+                                "routed": routed}
 
     if commit and update_cursor:
         weekly_state["last_run_iso"] = _iso(now)
