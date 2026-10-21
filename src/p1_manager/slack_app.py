@@ -93,14 +93,16 @@ def post_weekly_ask(preset_name: str, rows: list[dict], routed: dict | None = No
     if more > 0:
         lines.append(f"  ...and {more} more")
     if routed and routed.get("column_uuid"):
-        done = f":white_check_mark: Added {routed['created']} to *{routed['board']} / {routed['phase']}*"
+        done = (f":white_check_mark: Automatically put {routed['created']} on "
+                f"*{routed['board']} / {routed['phase']}*")
         if routed.get("skipped"):
-            done += f" ({routed['skipped']} already on the {routed['board']} board)"
+            done += f" ({routed['skipped']} were already on the {routed['board']} board)"
         if routed.get("failed"):
             done += f" ({routed['failed']} failed)"
         lines.append("\n" + done + ".")
-        lines.append("To add them to another board too, reply in this thread with the "
-                     "board and phase, e.g. `Acquisitions / Make Offer`.")
+        lines.append("To move them to a different board, reply in this thread with the board "
+                     "and phase, e.g. `Lead Management / No Contact` or "
+                     "`Lead Management / New Lead`.")
     else:
         if routed and routed.get("error"):
             lines.append(f"\n:warning: Couldn't put these on the Raw board automatically: "
@@ -301,16 +303,39 @@ def handle_reply(thread_ts: str, text: str, channel: str) -> None:
         return
 
     created, failed = 0, 0
+    placed = []
     for uuid in pending["property_uuids"]:
         try:
             client.create_siftline_card(column["uuid"], uuid)
             created += 1
+            placed.append(uuid)
         except Exception:  # noqa: BLE001
             failed += 1
     resolved.append(target_key)
+
+    # A batch the bot put on Raw / <county> by itself is MOVED by a reply to
+    # another board (Dan, 2026-10-21): its Raw card goes once the new card is
+    # in. Only the card in the phase the bot used is removed; a lead someone
+    # already moved along inside Raw stays where they put it.
+    auto = pending.get("auto_target") or {}
+    removed = kept = 0
+    moving = bool(auto.get("column_uuid")) and auto.get("board_uuid") != board["uuid"] \
+        and not auto.get("moved_to")
+    if moving:
+        removed, kept = routing.remove_cards(client, placed, auto["board_uuid"],
+                                             auto["column_uuid"])
+        auto["moved_to"] = target_key
     state.save_pending_ask(thread_ts, pending)  # stays open for further replies
-    summary = (f":white_check_mark: Added {created} card(s) to "
-              f"*{board.get('title')} / {column.get('title')}*")
+    if moving:
+        summary = (f":white_check_mark: Moved {removed} card(s) from *{auto.get('label')}* "
+                   f"to *{board.get('title')} / {column.get('title')}*")
+        if created > removed:
+            summary += f" ({created - removed} added there with no Raw card to remove)"
+        if kept:
+            summary += f" ({kept} were in another Raw phase and were left there)"
+    else:
+        summary = (f":white_check_mark: Added {created} card(s) to "
+                   f"*{board.get('title')} / {column.get('title')}*")
     if failed:
         summary += f" ({failed} failed)"
     if len(resolved) > 1:

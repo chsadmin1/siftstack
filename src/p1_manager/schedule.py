@@ -19,7 +19,8 @@ Configuration (all env vars, business-local time, never UTC -- a naive
 schedule drifts by an hour twice a year and fires at the wrong time):
   P1_TIMEZONE            default "America/New_York" (CHS sets "America/Boise")
   P1_WEEKLY_AT           HH:MM (default "08:00")
-  P1_WEEKLY_DAY          weekday name (default "saturday")
+  P1_WEEKLY_DAY          weekday name, or "daily" for every day (default
+                         "saturday"; CHS runs it daily at 06:00 since 2026-10-21)
   P1_MONTHLY_AT          HH:MM (default "08:00")
   P1_MONTHLY_DAY         day of month, 1-28 (default "28" -- Dan's own call,
                          and deliberately <=28 so it exists in every month)
@@ -132,11 +133,21 @@ class Slot:
         raise RuntimeError(f"no fire time found for slot {self.name!r} within 35 days")
 
 
+def _weekly_slot(hh: int, mm: int) -> Slot:
+    """The new-records job: one weekday, or every day with P1_WEEKLY_DAY=daily.
+    Its cursor (weekly_state last_run_iso) makes any cadence pick up exactly
+    what landed since the previous run."""
+    day = os.getenv("P1_WEEKLY_DAY", "saturday").strip().lower()
+    if day in ("daily", "every day", "everyday"):
+        return Slot("weekly", hh, mm, weekdays=(0, 1, 2, 3, 4, 5, 6))
+    return Slot("weekly", hh, mm, weekday=_weekday_index(day))
+
+
 def slots() -> list[Slot]:
     wh, wm = _parse_hhmm(os.getenv("P1_WEEKLY_AT", "08:00"), "P1_WEEKLY_AT")
     mh, mm = _parse_hhmm(os.getenv("P1_MONTHLY_AT", "08:00"), "P1_MONTHLY_AT")
     out = [
-        Slot("weekly", wh, wm, weekday=_weekday_index(os.getenv("P1_WEEKLY_DAY", "saturday"))),
+        _weekly_slot(wh, wm),
         Slot("monthly", mh, mm, day_of_month=_month_day()),
     ]
     enrich_at = os.getenv("P1_ENRICH_AT", "07:00,12:00").strip()

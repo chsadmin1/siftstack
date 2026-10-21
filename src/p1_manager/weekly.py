@@ -136,8 +136,12 @@ def run(*, commit: bool = True, window_days: int = DEFAULT_WINDOW_DAYS,
                 ask = {"preset_name": preset_name, "property_uuids": uuids,
                        "count": len(uuids), "since": _iso(since)}
                 if routed and routed.get("column_uuid"):
-                    # A later reply naming the same board+phase is a no-op.
+                    # A later reply naming the same board+phase is a no-op;
+                    # one naming another board moves them off this one.
                     ask["resolved_targets"] = [f"{routed['board_uuid']}/{routed['column_uuid']}"]
+                    ask["auto_target"] = {"board_uuid": routed["board_uuid"],
+                                          "column_uuid": routed["column_uuid"],
+                                          "label": f"{routed['board']} / {routed['phase']}"}
                 state.save_pending_ask(thread_ts, ask)
         else:
             routed = None
