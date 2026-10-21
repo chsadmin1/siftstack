@@ -210,6 +210,34 @@ caller to sign as, or the rendered copy fails the human-voice check.
 Name hygiene is applied here: "C Eugene Suthard" becomes "Hi Eugene", while
 "E A Henry" and any LLC or trust get the owner-of-the-address wording instead.
 
+### The daily campaign, and how to stop it for one seller
+
+With `SMS_AGENT_CAMPAIGN=1` the worker runs `seed` itself each business
+morning: it reads everyone in the DataSift saved filter
+`SMS_AGENT_CAMPAIGN_PRESET` (`Autotext` on the CHS account), keeps numbers
+whose OWN phone tag is Dial First or Dial Second (and not DNC, wrong or dead),
+and gives each the next of its four touches, at least `TOUCH_GAP_DAYS` apart.
+
+Taking a record out of that filter (for example removing the Autotext tag) is
+the off switch, and it takes effect the same day: before each queued touch
+sends, the worker re-checks preset membership (`campaign.left_cohort`, one
+cached sweep per 5 minutes) and cancels the touch if the record has left. If
+the preset can't be read, the touch waits rather than sending unchecked.
+Replies to a seller are not campaign touches and are unaffected.
+
+Phone tiers come from the P1 Manager (`src/p1_manager`): its Trestle watcher
+puts Autotext leads with no phone tier on a `Trestle - MM-DD-YYYY` list and
+posts an approvable cost preview in the P1 channel, and approving it tags
+each scored phone with its own tier.
+
+### Provider
+
+`SMS_AGENT_PROVIDER` picks the phone system: `smrtphone` (the default, and
+CHS's choice) or `kixie`. Kixie sends through its `/app/event` API as
+`KIXIE_AGENT_EMAIL` and reports texts and calls through webhooks to
+`/hooks/<secret>/kixie`; it has no do-not-text API, so an opt-out is
+suppressed locally and Slack asks someone to add it in Kixie by hand.
+
 ## Testing without sending anything
 
 ```bash
