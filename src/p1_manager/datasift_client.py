@@ -255,10 +255,24 @@ class DataSiftClient:
         204-style empty body, verified via a property_cards() read-back."""
         self.api(f"/api/internal/siftline/board/column/{column_uuid}/card/{card_uuid}/", "DELETE")
 
+    def _all(self, path: str) -> list[dict]:
+        """Every row of a listing, following `next`. Without ?limit= these
+        endpoints return one short page, so a board or phase past it was
+        invisible: a reply of "Raw / Canyon" matched nothing (2026-10-21)."""
+        out: list[dict] = []
+        url, guard = path, 0
+        while url and guard < 100:
+            guard += 1
+            r = self.api(url)
+            if not isinstance(r, dict):
+                return out + (r or [])
+            out.extend(r.get("results") or r.get("data") or [])
+            nxt = r.get("next")
+            url = nxt.replace(API_BASE, "") if nxt else None
+        return out
+
     def board_columns(self, board_uuid: str) -> list[dict]:
-        r = self.api(f"/api/internal/siftline/board/{board_uuid}/column/")
-        return (r.get("results") or r.get("data") or []) if isinstance(r, dict) else (r or [])
+        return self._all(f"/api/internal/siftline/board/{board_uuid}/column/?offset=0&limit=999")
 
     def boards(self) -> list[dict]:
-        r = self.api("/api/internal/siftline/board/")
-        return (r.get("results") or r.get("data") or []) if isinstance(r, dict) else (r or [])
+        return self._all("/api/internal/siftline/board/?offset=0&limit=999")

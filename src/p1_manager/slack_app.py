@@ -185,12 +185,19 @@ def _longest_in(text: str, items: list[dict]) -> dict | None:
     return max(hits, key=lambda x: len(_norm(x.get("title")))) if hits else None
 
 
+def _titled(items) -> list[dict]:
+    """Boards and columns carry their name as `title` or `name` depending on
+    the endpoint (account_blueprint/export.py reads both); match on either."""
+    return [{**x, "title": x.get("title") or x.get("name") or ""}
+            for x in (items or []) if isinstance(x, dict)]
+
+
 def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict | None, dict | None, str]:
     """Match a reply like 'Acquisitions / Make Offer', 'acquisitions make
     offer' or a SiftLine board link plus a phase, against REAL board + column
     names on the account. Never guesses: returns (board, column, "") on a
     confident match, else (None, None, a message saying what's missing)."""
-    boards = client.boards()
+    boards = _titled(client.boards())
     t = _norm(text)
     link = _SIFTLINE_LINK.search(text or "")
     board = None
@@ -199,15 +206,34 @@ def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict | None,
         if not board:
             return None, None, ("That SiftLine link isn't a board this account can see -- "
                                 "nothing was moved.")
-    board = board or _longest_in(t, boards)
-
-    if board:
-        columns = client.board_columns(board["uuid"])
-        # The board's own name can contain a phase word; don't let it match.
-        rest = t.replace(_norm(board.get("title")), " ") if not link else t
-        col = _longest_in(rest, columns)
+        col = _longest_in(t, _titled(client.board_columns(board["uuid"])))
         if col:
             return board, col, ""
+    else:
+        # "Board / Phase" said explicitly: the slash is the divider.
+        left, sep, right = (text or "").partition("/")
+        if sep:
+            b = next((x for x in boards if _norm(x["title"]) == _norm(left)), None)
+            if b:
+                col = next((c for c in _titled(client.board_columns(b["uuid"]))
+                            if _norm(c["title"]) == _norm(right)), None)
+                if col:
+                    return b, col, ""
+        # Otherwise every board named in the text, longest first; the first
+        # whose phase also appears in the rest of the text wins. So "Raw
+        # Canyon" lands on board Raw / phase Canyon even if a board "Raw -
+        # Canyon" with no such phase exists too.
+        named = sorted((x for x in boards if _norm(x["title"]).strip() and _norm(x["title"]) in t),
+                       key=lambda x: len(_norm(x["title"])), reverse=True)
+        for b in named:
+            rest = t.replace(_norm(b["title"]), " ")  # its own name can't be the phase
+            col = _longest_in(rest, _titled(client.board_columns(b["uuid"])))
+            if col:
+                return b, col, ""
+        board = named[0] if named else None
+
+    if board:
+        columns = _titled(client.board_columns(board["uuid"]))
         if len(columns) == 1:
             return board, columns[0], ""
         names = ", ".join(c.get("title", "") for c in columns) or "(none)"
@@ -217,7 +243,7 @@ def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict | None,
                             "Nothing was moved.")
 
     # No board named -- a phase name alone works if only one board has it.
-    hits = [(b, c) for b in boards for c in client.board_columns(b["uuid"])
+    hits = [(b, c) for b in boards for c in _titled(client.board_columns(b["uuid"]))
             if _norm(c.get("title")).strip() and _norm(c.get("title")) in t]
     if len(hits) == 1:
         return hits[0][0], hits[0][1], ""

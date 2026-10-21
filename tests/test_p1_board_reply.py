@@ -71,6 +71,35 @@ def test_siftline_link_names_the_board():
     assert "isn't a board" in _pick("https://app.reisift.io/siftline/" + "0" * 8 + "-0000-0000-0000-" + "0" * 12)[2]
 
 
+def test_raw_canyon_every_way_dan_typed_it():
+    c = FakeClient()
+    c._boards.append({"uuid": "b-r2", "name": "Raw Leads"})   # `name`, not `title`
+    c._cols["b-r2"] = [{"uuid": "c9", "name": "Canyon"}]
+    c._cols["b-raw"].append({"uuid": "c7", "title": "Canyon"})
+    for text in ("Raw / Canyon", "Raw/Canyon", "raw canyon", "Raw - Canyon / New Lead"):
+        b, col, problem = slack_app.resolve_board_phase(c, text)
+        assert b and col, (text, problem)
+    assert slack_app.resolve_board_phase(c, "Raw/Canyon")[:2] == (
+        {"uuid": "b-raw", "title": "Raw"}, {"uuid": "c7", "title": "Canyon"})
+    b, col, _ = slack_app.resolve_board_phase(c, "Raw Leads / Canyon")
+    assert b["uuid"] == "b-r2" and col["uuid"] == "c9"
+
+
+def test_boards_and_phases_are_read_past_the_first_page():
+    import datasift_client
+
+    pages = {
+        "/api/internal/siftline/board/?offset=0&limit=999":
+            {"results": [{"uuid": "b1", "title": "Acquisitions"}],
+             "next": datasift_client.API_BASE + "/api/internal/siftline/board/?offset=1&limit=999"},
+        "/api/internal/siftline/board/?offset=1&limit=999":
+            {"results": [{"uuid": "b2", "title": "Raw"}], "next": None},
+    }
+    c = datasift_client.DataSiftClient.__new__(datasift_client.DataSiftClient)
+    c.api = lambda path, *a, **k: pages[path]
+    assert [b["title"] for b in c.boards()] == ["Acquisitions", "Raw"]
+
+
 def test_single_phase_board_needs_no_phase():
     assert _pick("Solo Board")[:2] == ("Solo Board", "Only Phase")
 
