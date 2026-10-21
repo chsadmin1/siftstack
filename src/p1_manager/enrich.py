@@ -183,7 +183,11 @@ def collect(client: DataSiftClient, lists: list[dict]) -> dict:
             u = row.get("uuid") or row.get("saved_uuid")
             if u:
                 uuids.setdefault(u, lst.get("title", ""))
+    return {**collect_records(client, list(uuids)), "list_sizes": per_list}
 
+
+def collect_records(client: DataSiftClient, uuids: list[str]) -> dict:
+    """What still needs work among these specific records."""
     records: dict[str, list[str]] = {}
     needs_trace: list[str] = []
     already, no_hit, errors = 0, 0, 0
@@ -203,7 +207,6 @@ def collect(client: DataSiftClient, lists: list[dict]) -> dict:
     return {
         "records": records,
         "needs_trace": needs_trace,
-        "list_sizes": per_list,
         "total_records": len(uuids),
         "already_tiered": already,
         "no_hit": no_hit,
@@ -239,6 +242,11 @@ def new_lists(client: DataSiftClient) -> tuple[list[dict], bool]:
                   "not_trestle")
         fresh = [x for x in fresh if (x.get("title") or "").startswith(ONLY_PREFIX)]
     return fresh, False
+
+
+def mark_handled(list_uuid: str, title: str, status: str) -> None:
+    """Keep the scheduled scan off a list something else previews itself."""
+    _mark([list_uuid], {list_uuid: title}, status)
 
 
 def _mark(list_uuids: list[str], titles: dict[str, str], status: str) -> None:
@@ -323,6 +331,45 @@ def run_preview(post, client: DataSiftClient | None = None,
     })
     return {"new_lists": len(lists), "phones": c["phones"], "est_cost": c["est_cost"],
             "needs_trace": len(c["needs_trace"]), "ts": ts}
+
+
+def post_batch_preview(post, client: DataSiftClient, list_uuid: str, title: str,
+                       uuids: list[str], header: str) -> str | None:
+    """Preview exactly these records, under `header`, as one approvable post.
+
+    The Trestle queue calls this the moment it adds Autotext leads to a list,
+    so the team sees why and can approve in the same message instead of
+    waiting for the next scheduled scan. Returns the thread ts, or None when
+    nothing needs scoring or the post failed."""
+    c = collect_records(client, uuids)
+    if not c["records"] and not c["needs_trace"]:
+        return None
+    lines = [header, ""]
+    if c["records"]:
+        lines.append(f"*{len(c['records'])} records* have phones to score: *{c['phones']} unique "
+                     f"numbers*, estimated *${c['est_cost']:.2f}* in Trestle charges "
+                     f"(${PRICE_PER_PHONE:.3f} per number).")
+    if c["needs_trace"]:
+        lines.append(
+            f":mag: *{len(c['needs_trace'])} records have never been skip traced.* Approving also "
+            "starts a DataSift skip trace (free on your unlimited plan; DataSift runs it on every "
+            "untraced record in the account). Their new numbers are scored as they arrive, "
+            f"roughly *${c['est_trace_cost']:.2f}* more.")
+    if c["read_errors"]:
+        lines.append(f"{c['read_errors']} records could not be read and are left out.")
+    lines.append("\nReply *approve* in this thread to score them, or *skip* to pass. "
+                 "Nothing is charged until someone approves.")
+    ts = post("\n".join(lines))
+    if not ts:
+        return None
+    state.save_pending_ask(ts, {
+        "kind": "enrich", "status": "pending",
+        "list_uuids": [list_uuid], "list_titles": {list_uuid: title},
+        "records": c["records"], "needs_trace": c["needs_trace"],
+        "phones": c["phones"], "est_cost": c["est_cost"],
+        "no_hit": c["no_hit"], "created": _now(),
+    })
+    return ts
 
 
 # ---------------------------------------------------------------- skip trace

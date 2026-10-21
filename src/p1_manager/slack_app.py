@@ -259,6 +259,11 @@ def _startup() -> None:
     log.info("P1 List Manager receiver up")
     if os.environ.get("P1_INLINE_SCHEDULER", "1").strip() in ("1", "true", "yes", "on"):
         _start_inline_scheduler()
+        import schedule
+        if schedule.trestle_enabled() and schedule._slack_ready():
+            import trestle_queue
+            trestle_queue.start_watcher(post_to_channel)
+            log.info("Trestle watcher started")
     _start_socket_mode()
 
 
@@ -389,7 +394,7 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
 
     POST /trigger/weekly?secret=...&only=Preset One|Preset Two&commit=true
     POST /trigger/monthly?secret=...&commit=false
-    POST /trigger/trestle?secret=...                      # queue unscored Autotext leads now
+    POST /trigger/trestle?secret=...                      # one Trestle sweep now
     POST /trigger/enrich?secret=...                       # run the enrichment preview now
     POST /trigger/enrich?secret=...&only=List A|List B    # preview specific lists, even
                                                           # ones already handled
@@ -411,7 +416,7 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
     def _run():
         if job == "trestle":
             import trestle_queue
-            trestle_queue.run(post_to_channel, commit=commit, force=True)
+            trestle_queue.sweep(post_to_channel, commit=commit)
             return
         if job == "enrich":
             import enrich
