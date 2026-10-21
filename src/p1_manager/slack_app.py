@@ -33,6 +33,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -167,30 +168,93 @@ def verify_signature(body: bytes, timestamp: str, signature: str) -> bool:
     return hmac.compare_digest(digest, signature)
 
 
-def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict, dict] | None:
-    """Match free text like 'Acquisitions / Make Offer' or 'acquisitions make
-    offer' against REAL board + column names on the account. Never guesses a
-    board/column that doesn't exist -- returns None on no confident match."""
-    boards = client.boards()
-    t = text.lower()
-    for board in boards:
-        board_title = (board.get("title") or "").lower()
-        if board_title and board_title not in t:
-            continue
-        columns = client.board_columns(board["uuid"])
-        for col in columns:
-            col_title = (col.get("title") or "").lower()
-            if col_title and col_title in t:
-                return board, col
-    # No board name in the text (or it didn't match) -- try phase name alone
-    # against every board's columns, but only act on an UNAMBIGUOUS match.
-    hits = []
-    for board in boards:
-        for col in client.board_columns(board["uuid"]):
-            col_title = (col.get("title") or "").lower()
-            if col_title and col_title in t:
-                hits.append((board, col))
-    return hits[0] if len(hits) == 1 else None
+_SIFTLINE_LINK = re.compile(r"siftline/([0-9a-fA-F-]{36})")
+
+
+def _norm(s: str) -> str:
+    """Lowercase, every dash/slash/pipe/colon as a space, single spaces, padded.
+    Slack turns a typed hyphen into an en dash, DataSift strips em dashes, and
+    'Raw - Canyon' vs 'Raw – Canyon' must not decide whether a card moves."""
+    return " " + " ".join(re.sub(r"[\-–—_/|:,]+", " ", (s or "").lower()).split()) + " "
+
+
+def _longest_in(text: str, items: list[dict]) -> dict | None:
+    """The item whose whole title appears in `text` (both _norm'd), longest
+    first, so a board 'Raw' never wins over 'Raw - Canyon'."""
+    hits = [x for x in items if _norm(x.get("title")).strip() and _norm(x.get("title")) in text]
+    return max(hits, key=lambda x: len(_norm(x.get("title")))) if hits else None
+
+
+def _titled(items) -> list[dict]:
+    """Boards and columns carry their name as `title` or `name` depending on
+    the endpoint (account_blueprint/export.py reads both); match on either."""
+    return [{**x, "title": x.get("title") or x.get("name") or ""}
+            for x in (items or []) if isinstance(x, dict)]
+
+
+def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict | None, dict | None, str]:
+    """Match a reply like 'Acquisitions / Make Offer', 'acquisitions make
+    offer' or a SiftLine board link plus a phase, against REAL board + column
+    names on the account. Never guesses: returns (board, column, "") on a
+    confident match, else (None, None, a message saying what's missing)."""
+    boards = _titled(client.boards())
+    t = _norm(text)
+    link = _SIFTLINE_LINK.search(text or "")
+    board = None
+    if link:
+        board = next((b for b in boards if b.get("uuid") == link.group(1).lower()), None)
+        if not board:
+            return None, None, ("That SiftLine link isn't a board this account can see -- "
+                                "nothing was moved.")
+        col = _longest_in(t, _titled(client.board_columns(board["uuid"])))
+        if col:
+            return board, col, ""
+    else:
+        # "Board / Phase" said explicitly: the slash is the divider.
+        left, sep, right = (text or "").partition("/")
+        if sep:
+            b = next((x for x in boards if _norm(x["title"]) == _norm(left)), None)
+            if b:
+                col = next((c for c in _titled(client.board_columns(b["uuid"]))
+                            if _norm(c["title"]) == _norm(right)), None)
+                if col:
+                    return b, col, ""
+        # Otherwise every board named in the text, longest first; the first
+        # whose phase also appears in the rest of the text wins. So "Raw
+        # Canyon" lands on board Raw / phase Canyon even if a board "Raw -
+        # Canyon" with no such phase exists too.
+        named = sorted((x for x in boards if _norm(x["title"]).strip() and _norm(x["title"]) in t),
+                       key=lambda x: len(_norm(x["title"])), reverse=True)
+        for b in named:
+            rest = t.replace(_norm(b["title"]), " ")  # its own name can't be the phase
+            col = _longest_in(rest, _titled(client.board_columns(b["uuid"])))
+            if col:
+                return b, col, ""
+        board = named[0] if named else None
+
+    if board:
+        columns = _titled(client.board_columns(board["uuid"]))
+        if len(columns) == 1:
+            return board, columns[0], ""
+        names = ", ".join(c.get("title", "") for c in columns) or "(none)"
+        return None, None, (f"Found the board *{board.get('title')}*, but not which phase. "
+                            f"Its phases are: {names}. Reply with the board and phase, e.g. "
+                            f"`{board.get('title')} / {columns[0].get('title') if columns else 'Phase'}`. "
+                            "Nothing was moved.")
+
+    # No board named -- a phase name alone works if only one board has it.
+    hits = [(b, c) for b in boards for c in _titled(client.board_columns(b["uuid"]))
+            if _norm(c.get("title")).strip() and _norm(c.get("title")) in t]
+    if len(hits) == 1:
+        return hits[0][0], hits[0][1], ""
+    names = ", ".join(b.get("title", "") for b in boards[:20]) or "(none)"
+    if hits:
+        return None, None, ("That phase is on more than one board -- add the board name, "
+                            f"e.g. `{hits[0][0].get('title')} / {hits[0][1].get('title')}`. "
+                            "Nothing was moved.")
+    return None, None, (f"Couldn't find that board on the account. Boards: {names}. Reply "
+                        "with the board and phase, e.g. `Acquisitions / Make Offer`. "
+                        "Nothing was moved.")
 
 
 def handle_reply(thread_ts: str, text: str, channel: str) -> None:
@@ -212,16 +276,12 @@ def handle_reply(thread_ts: str, text: str, channel: str) -> None:
         return
 
     client = DataSiftClient.from_env()
-    match = resolve_board_phase(client, text)
-    if not match:
+    board, column, problem = resolve_board_phase(client, text)
+    if not board:
         _call("chat.postMessage", {
-            "channel": channel, "thread_ts": thread_ts,
-            "text": ":warning: Couldn't match that to a real board + phase on "
-                    "the account -- nothing was moved. Reply again with the "
-                    "exact board and phase name."})
+            "channel": channel, "thread_ts": thread_ts, "text": ":warning: " + problem})
         return
 
-    board, column = match
     resolved = pending.setdefault("resolved_targets", [])
     target_key = f"{board['uuid']}/{column['uuid']}"
     if target_key in resolved:
