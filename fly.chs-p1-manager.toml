@@ -22,8 +22,10 @@ primary_region = 'iad'
   # CHS is Ada + Canyon counties, Idaho: every clock below is Mountain time.
   # (Was America/New_York, which ran the Saturday job at 6 AM Mountain.)
   P1_TIMEZONE = 'America/Boise'
-  P1_WEEKLY_AT = '08:00'
-  P1_WEEKLY_DAY = 'saturday'
+  # New P1 records are checked and put on Raw / <county> every day at 6 AM
+  # (Dan, 2026-10-21), not just Saturdays.
+  P1_WEEKLY_AT = '06:00'
+  P1_WEEKLY_DAY = 'daily'
   P1_MONTHLY_AT = '08:00'
   P1_MONTHLY_DAY = '28'
   P1_WEEKLY_DRY_RUN = '0'

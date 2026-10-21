@@ -79,6 +79,35 @@ def _already_on_board(client: DataSiftClient, property_uuid: str, board_uuid: st
                 else c.get("board")) == board_uuid for c in cards or [])
 
 
+def _uuid_of(x) -> str:
+    return (x or {}).get("uuid", "") if isinstance(x, dict) else (x or "")
+
+
+def remove_cards(client: DataSiftClient, property_uuids: list[str], board_uuid: str,
+                 column_uuid: str) -> tuple[int, int]:
+    """Delete each record's card in exactly this board phase (the one route()
+    made). Returns (removed, kept): kept = records whose card has since been
+    moved elsewhere on the board, which are left alone."""
+    removed = kept = 0
+    for uuid in property_uuids:
+        try:
+            cards = client.property_cards(uuid)
+        except ApiError as e:
+            log.warning("could not read cards for %s: %s", uuid, str(e)[:120])
+            continue
+        on_board = [c for c in cards or [] if _uuid_of(c.get("board")) == board_uuid]
+        mine = [c for c in on_board if _uuid_of(c.get("column")) == column_uuid]
+        for card in mine:
+            try:
+                client.delete_siftline_card(column_uuid, card["uuid"])
+                removed += 1
+            except ApiError as e:
+                log.warning("could not remove card %s: %s", card.get("uuid"), str(e)[:120])
+        if on_board and not mine:
+            kept += 1
+    return removed, kept
+
+
 def route(client: DataSiftClient, preset_detail: dict, property_uuids: list[str]) -> dict:
     """Create cards on Raw / <county>. Returns what happened, for the Slack post:
     {board, phase, board_uuid, column_uuid, created, skipped, failed} or {error}."""
