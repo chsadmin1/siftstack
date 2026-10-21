@@ -48,6 +48,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import routing  # noqa: E402
 import state  # noqa: E402
 from datasift_client import DataSiftClient  # noqa: E402
 
@@ -79,9 +80,10 @@ def _call(method: str, payload: dict) -> dict:
 
 # ---- outbound: the weekly ask + the monthly report ----
 
-def post_weekly_ask(preset_name: str, rows: list[dict]) -> str | None:
-    """Posts the new-records summary + the board/phase question. Returns the
-    message ts (used as the thread key), or None on failure."""
+def post_weekly_ask(preset_name: str, rows: list[dict], routed: dict | None = None) -> str | None:
+    """Posts the new-records summary and where they went (routing.py), or the
+    board/phase question when auto-routing is off or couldn't place them.
+    Returns the message ts (the thread key), or None on failure."""
     addresses = [r.get("address") for r in rows[:MAX_SAMPLE_ADDRESSES] if r.get("address")]
     more = len(rows) - len(addresses)
     lines = [
@@ -90,9 +92,22 @@ def post_weekly_ask(preset_name: str, rows: list[dict]) -> str | None:
     ]
     if more > 0:
         lines.append(f"  ...and {more} more")
-    lines.append("\nShould these go onto a *SiftLine board + phase*? "
-                 "If yes, reply *in this thread* with the board and phase, "
-                 "e.g. `Acquisitions / Make Offer`. No reply = no action.")
+    if routed and routed.get("column_uuid"):
+        done = f":white_check_mark: Added {routed['created']} to *{routed['board']} / {routed['phase']}*"
+        if routed.get("skipped"):
+            done += f" ({routed['skipped']} already on the {routed['board']} board)"
+        if routed.get("failed"):
+            done += f" ({routed['failed']} failed)"
+        lines.append("\n" + done + ".")
+        lines.append("To add them to another board too, reply in this thread with the "
+                     "board and phase, e.g. `Acquisitions / Make Offer`.")
+    else:
+        if routed and routed.get("error"):
+            lines.append(f"\n:warning: Couldn't put these on the Raw board automatically: "
+                         f"{routed['error']}.")
+        lines.append("\nShould these go onto a *SiftLine board + phase*? "
+                     "If yes, reply *in this thread* with the board and phase, "
+                     "e.g. `Raw / Canyon`. No reply = no action.")
     resp = _call("chat.postMessage", {
         "channel": _env("SLACK_CHANNEL_ID"),
         "text": "\n".join(lines),
@@ -172,10 +187,7 @@ _SIFTLINE_LINK = re.compile(r"siftline/([0-9a-fA-F-]{36})")
 
 
 def _norm(s: str) -> str:
-    """Lowercase, every dash/slash/pipe/colon as a space, single spaces, padded.
-    Slack turns a typed hyphen into an en dash, DataSift strips em dashes, and
-    'Raw - Canyon' vs 'Raw – Canyon' must not decide whether a card moves."""
-    return " " + " ".join(re.sub(r"[\-–—_/|:,]+", " ", (s or "").lower()).split()) + " "
+    return routing.norm(s)
 
 
 def _longest_in(text: str, items: list[dict]) -> dict | None:
@@ -186,10 +198,7 @@ def _longest_in(text: str, items: list[dict]) -> dict | None:
 
 
 def _titled(items) -> list[dict]:
-    """Boards and columns carry their name as `title` or `name` depending on
-    the endpoint (account_blueprint/export.py reads both); match on either."""
-    return [{**x, "title": x.get("title") or x.get("name") or ""}
-            for x in (items or []) if isinstance(x, dict)]
+    return routing.titled(items)
 
 
 def resolve_board_phase(client: DataSiftClient, text: str) -> tuple[dict | None, dict | None, str]:
