@@ -1,5 +1,6 @@
-"""The weekly job's "mouth and ears": posts the new-P1-records question to
-Slack and listens for a threaded reply naming a SiftLine board + phase.
+"""The P1 Manager's Slack side and HTTP app: posts the daily new-records
+notice, the phone-scoring previews and the reports, and listens for threaded
+replies (a SiftLine board + phase, or approve/skip on a preview).
 
 Uses FastAPI + uvicorn, matching src/sms_agent/receiver.py's stack exactly
 (already a dependency here -- no reason to add slack_bolt/slack_sdk on top of
@@ -12,20 +13,24 @@ before anything in the body is trusted (HMAC over "v0:{timestamp}:{body}",
 Slack's own documented scheme) -- an unverified POST to this endpoint must
 never be treated as a real Slack event.
 
-THE ASK-AND-WAIT FLOW:
-  1. weekly.py finds new records on a P1 preset and calls post_weekly_ask(),
-     which posts one Slack message and returns its `ts`. weekly.py stores
-     {ts: {preset_name, property_uuids}} via state.save_pending_ask().
-  2. A human replies IN THAT THREAD with a board + phase, e.g.
-     "Acquisitions / Make Offer".
-  3. Slack POSTs a `message` event with `thread_ts` == the original ts.
-     handle_event() looks up the pending ask, resolves the reply text
-     against the account's REAL board/column names (never guesses one),
-     creates a SiftLine card for every property_uuid in the batch, and
-     replies in-thread confirming what happened.
-  4. No reply, no timeout-driven action -- silence means wait, this touches
-     a live pipeline (see datasift_client.py's docstring on the 2026-08-11
-     incident for why writes here stay conservative).
+THE NEW-RECORDS FLOW (daily, 6 AM Eastern since 2026-10-21):
+  1. weekly.py finds new records on each P1 preset, puts them on SiftLine
+     board Raw / <county> itself (routing.py), and calls post_weekly_ask(),
+     which says where they went and returns the message `ts`. weekly.py
+     stores {ts: {preset_name, property_uuids, auto_target}} via
+     state.save_pending_ask(). If routing couldn't place them, the post asks
+     for a board + phase instead.
+  2. A human may reply IN THAT THREAD with another board + phase, e.g.
+     "Lead Management / No Contact". The reply text is matched against the
+     account's REAL board/column names (resolve_board_phase: a pasted
+     SiftLine link, "/" as the divider, dash style and case ignored; never a
+     guess -- a miss says which boards or phases exist).
+  3. The first such reply MOVES the batch: a card is created on the named
+     board and the Raw card the bot made is deleted (one someone moved to
+     another Raw phase is left alone). Later replies only add cards.
+  4. No reply, no action beyond the automatic Raw placement.
+Phone-scoring previews (enrich.py, trestle_queue.py) are pending asks of
+kind "enrich" and are answered with approve / skip in their own threads.
 """
 from __future__ import annotations
 
@@ -522,7 +527,7 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
             post_slack = post_weekly_ask if (commit and schedule._slack_ready()) else None
             import weekly
             # A scoped (only=...) run is a manual test -- it must never move
-            # the shared cursor the real unscoped Saturday run relies on
+            # the shared cursor the real unscoped daily run relies on
             # (caught live 2026-09-23: a broken scoped attempt advanced the
             # cursor anyway and starved the very next retry's time window).
             import enrich

@@ -1,6 +1,9 @@
-"""Saturday job: find records newly added to P1 presets this past week, tag
-them, put them on the county's Raw board phase (routing.py), and post where
-they went to Slack, where a reply can add them to another board+phase too.
+"""Daily new-records job (6 AM Eastern since 2026-10-21; it was the Saturday
+job, hence the name): find records newly added to P1 presets since the last
+run, tag them, turn "swap owners" on for every P1 preset, put the records on
+the county's Raw board phase (routing.py), post where they went to Slack
+(a reply there moves them to another board + phase), and post one approvable
+Trestle offer for all of them (enrich.preview_new_p1).
 
 THE KEY DISCOVERY (verified live 2026-09-22) that shapes this whole module:
 map.reisift.io's own POST /properties/search/ result rows already carry
