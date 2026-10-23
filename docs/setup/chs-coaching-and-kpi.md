@@ -21,16 +21,41 @@ Cost: about $0.01 for transcription plus $0.05 to $0.15 for grading per call. At
 
 ## One-time setup
 
-### 1. smrtPhone: save a login for the agent
+### 1. smrtPhone: keep a login saved for the agent
 
 Call recording must be on for every rep in smrtPhone.
 
-1. On the office machine, from the repo root, run `python src/call_coaching/smrtphone_login.py`. A browser opens. Log in to smrtPhone by hand, including any 2FA, then press Enter in the console.
-2. The script saves the login and prints a PowerShell line. Run that line; it copies the login, base64-encoded, to the clipboard.
-3. In GitHub, Settings > Secrets and variables > Actions, add a secret `SMRTPHONE_SESSION` and paste.
-4. Run Actions > "Upload smrtPhone session". It posts the login to the agent, and fails if smrtPhone rejects it.
+The agent reads smrtPhone's call log through a saved smrtPhone login, and that login runs out. The P1 Manager checks it every hour from 6 AM to 8 PM Mountain and logs back in by itself (`src/p1_manager/smrtphone_keeper.py`). Its notices go to the P1 channel. It uses the **chs@creativehomesolutions.org** smrtPhone login, which can see every rep's calls.
 
-Repeat these four steps whenever the coaching Slack post says the smrtPhone login has expired. The same login lets the agent pause texts when a rep calls a seller, so an expired login also stops that.
+**One-time setup:**
+
+1. **Turn on the authenticator app for chs@ in smrtPhone,** if it isn't already. When smrtPhone shows the QR code, also scan it with an authenticator app on a team phone, so people can still log in.
+2. **Copy the authenticator key.** smrtPhone shows it as text next to the QR code, often under a link like "can't scan the code?". If it only shows the QR code, ask whoever maintains this repo for a way to read the key from it without anyone seeing it.
+3. **Add three repo secrets** in GitHub, under Settings > Secrets and variables > Actions:
+   - `SMRTPHONE_LOGIN_EMAIL`: chs@creativehomesolutions.org
+   - `SMRTPHONE_LOGIN_PASSWORD`: that login's smrtPhone password
+   - `SMRTPHONE_TOTP_SECRET`: the authenticator key from step 2
+4. **Run Actions > "Deploy P1 Manager".** Type the same org slug as before, and leave the Slack channel box blank.
+5. **Run Actions > "Check smrtPhone login"** with "Log in again even if it works" ticked. A green check and "logged in to smrtPhone again" in the P1 channel mean it's done.
+
+With the authenticator key saved, the robot makes its own codes, and nobody has to do anything. Without it, smrtPhone texts a code to the phone on the chs@ login. The robot then posts in the P1 channel asking for it. Reply in that thread with just the code, like `123456`, within 15 minutes. Reply `new code` if it ran out. An unanswered request is asked again after 4 hours.
+
+**What the P1 channel messages mean:**
+
+| Message | What to do |
+|---|---|
+| "logged in to smrtPhone again" | Nothing. |
+| "smrtPhone needs a login code" | Reply in the thread with the code from the text message or the authenticator app. |
+| "couldn't log back in" and mentions the password | The chs@ smrtPhone password changed. Update `SMRTPHONE_LOGIN_PASSWORD`, run "Deploy P1 Manager", then "Check smrtPhone login". |
+| "couldn't log back in" and mentions the authenticator key | Update `SMRTPHONE_TOTP_SECRET` the same way. |
+| "has no smrtPhone password saved" | Do the one-time setup above. |
+
+**By hand, as a backup:**
+
+1. On the office machine, from the repo root, run `python src/call_coaching/smrtphone_login.py`. A browser opens. Log in to smrtPhone by hand, including any 2FA. Wait until you see the inside of smrtPhone, then press Enter in the console.
+2. The script saves the login and prints a PowerShell line. Run that line; it copies the login, base64-encoded, to the clipboard.
+3. In GitHub, Settings > Secrets and variables > Actions, add or update the secret `SMRTPHONE_SESSION` and paste.
+4. Run Actions > "Upload smrtPhone session". It posts the login to the agent, and fails if smrtPhone rejects it.
 
 ### 2. Redeploy chs-sms-agent
 
@@ -103,7 +128,7 @@ Use the same spelling of your name every day, and a date like `10/07/2026`. Blan
 
 ## Troubleshooting
 
-- **"smrtPhone login is missing or expired"** in Slack: redo step 1 (capture a login, update `SMRTPHONE_SESSION`, run "Upload smrtPhone session").
+- **"smrtPhone login is missing or expired"** in the coaching post: check the P1 channel for a message from the login keeper and do what the table in step 1 says. If there is none, run Actions > "Check smrtPhone login".
 - **"could not read the smrtPhone call log from the SMS agent"** in Slack: the agent is down or the secret differs. Check `https://chs-sms-agent.fly.dev/health`. If `SMS_AGENT_ALLOWED_IPS` is set on the agent, GitHub's runners are blocked; leave it unset.
 - **PERMISSION_DENIED** writing the call audit sheet: it is not shared with the service account as Editor.
 - **A KPI section shows all zeros**: a header on that tab was renamed. The bot matches header text exactly, apart from leading and trailing spaces. `docs/kpi/KPI-REFERENCE.md` lists the expected headers.

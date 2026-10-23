@@ -1606,6 +1606,14 @@ def run(live_model: bool = False) -> int:
                         str(body))
                 r.check("login upload never echoes a cookie", "laravel_session" not in resp.text,
                         resp.text[:200])
+                resp = client.get("/hooks/selftest-secret/smrtphone-session")
+                body = resp.json()
+                r.check("login status reports a saved, working login", resp.status_code == 200
+                        and body.get("exists") is True and body.get("session_ok") is True
+                        and bool(body.get("saved_at")), str(body))
+                r.check("login status never echoes a cookie", "laravel_session" not in resp.text, resp.text[:200])
+                resp = client.get("/hooks/wrong-secret/smrtphone-session")
+                r.check("login status rejects a wrong secret", resp.status_code == 404, f"got {resp.status_code}")
 
                 def _no_login(since, until):
                     raise call_log.SessionError("no smrtPhone session")

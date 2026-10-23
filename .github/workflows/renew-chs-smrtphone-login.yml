@@ -1,0 +1,57 @@
+name: Check smrtPhone login
+
+# Asks the P1 Manager to check the texting robot's smrtPhone login right now,
+# and to renew it if it has stopped working. The same check runs by itself
+# every hour from 6 AM to 8 PM Mountain (src/p1_manager/smrtphone_keeper.py),
+# so this is for testing, or for after you change one of the smrtPhone secrets.
+#
+# "Log in again even if it works" forces a fresh login. Without an
+# authenticator key saved, that makes smrtPhone text a code, and the robot asks
+# for it in the P1 channel.
+#
+# The log shows what happened in plain words, plus the names of the fields on
+# each smrtPhone page it saw. It never shows a password, code or cookie.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Log in again even if it works"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: chs-smrtphone-login
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask the P1 Manager
+        env:
+          TRIGGER_SECRET: ${{ secrets.P1_TRIGGER_SECRET }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TRIGGER_SECRET" ]; then echo "::error::P1_TRIGGER_SECRET is not set."; exit 1; fi
+          resp="$RUNNER_TEMP/resp.json"
+          code=000
+          for attempt in 1 2 3; do  # Fly's edge often drops the first request after idle
+            code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST --max-time 180 \
+              "https://chs-p1-manager.fly.dev/trigger/smrtphone?secret=$TRIGGER_SECRET&force=$FORCE") || code=000
+            if [ "$code" != "000" ]; then break; fi
+            sleep 5
+          done
+          echo "HTTP $code"
+          if [ -f "$resp" ]; then python3 -m json.tool "$resp" || cat "$resp"; fi
+          if [ "$code" != "200" ]; then echo "::error::The P1 Manager did not answer (HTTP $code)."; exit 1; fi
+          status=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('status',''))" "$resp")
+          case "$status" in
+            ok) echo "The robot's smrtPhone login works." ;;
+            renewed) echo "The robot logged in to smrtPhone again." ;;
+            waiting_for_code) echo "smrtPhone wants a code. Reply with it in the P1 channel's Slack thread." ;;
+            *) echo "::error::Status: $status. See the details above."; exit 1 ;;
+          esac

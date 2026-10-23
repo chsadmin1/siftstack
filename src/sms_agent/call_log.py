@@ -213,6 +213,16 @@ def save_session(state) -> int:
     return len(cookies)
 
 
+def session_status() -> dict:
+    """Is a login saved, when, and does it read the call log right now?"""
+    path = Path(config.SMRTPHONE_STATE_FILE)
+    if not path.exists():
+        return {"exists": False, "saved_at": None, "session_ok": False, "detail": "no smrtPhone login saved"}
+    saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+    ok, detail = check_session()
+    return {"exists": True, "saved_at": saved, "session_ok": ok, "detail": detail}
+
+
 def check_session() -> tuple[bool, str]:
     """Can the saved login read the call log right now? Reads one row."""
     try:

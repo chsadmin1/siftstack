@@ -76,6 +76,23 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      - name: Push the texting robot's smrtPhone login
+        # Passed through env and quoted, never pasted into the command line, so
+        # a password with spaces or symbols arrives intact. Each is optional:
+        # without them the keeper only posts how to renew the login by hand.
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          SMRTPHONE_LOGIN_EMAIL: ${{ secrets.SMRTPHONE_LOGIN_EMAIL }}
+          SMRTPHONE_LOGIN_PASSWORD: ${{ secrets.SMRTPHONE_LOGIN_PASSWORD }}
+          SMRTPHONE_TOTP_SECRET: ${{ secrets.SMRTPHONE_TOTP_SECRET }}
+          SMS_AGENT_WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET || secrets.CHS_SMS_WEBHOOK_SECRET }}
+        run: |
+          ARGS=()
+          for name in SMRTPHONE_LOGIN_EMAIL SMRTPHONE_LOGIN_PASSWORD SMRTPHONE_TOTP_SECRET SMS_AGENT_WEBHOOK_SECRET; do
+            if [ -n "${!name}" ]; then ARGS+=("$name=${!name}"); else echo "skipping $name (secret not set yet)"; fi
+          done
+          if [ ${#ARGS[@]} -gt 0 ]; then flyctl secrets set -a chs-p1-manager --stage "${ARGS[@]}"; fi
+
       - name: Deploy to Fly
         run: flyctl deploy --remote-only -c fly.chs-p1-manager.toml -a chs-p1-manager
         env:
