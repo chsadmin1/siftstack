@@ -44,7 +44,9 @@ Taking a record out of the `Autotext` preset (removing the tag it filters on) is
 
 DataSift's own smrtPhone integration logs texts and replies to each record's activity; watch for a double count of `sms_attempts` on the first live send.
 
-`python src/sms_agent/cli.py selftest` runs 300 zero-network checks (section 13 covers the smrtPhone call log, the login upload and call takeover); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`. "a send increments the Sift counter" fails when run before 9 AM Eastern, because the probe send waits for business hours.
+`python src/sms_agent/cli.py selftest` runs 302 zero-network checks (section 13 covers the smrtPhone call log, the login upload and call takeover); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`. "a send increments the Sift counter" fails when run before 9 AM Eastern, because the probe send waits for business hours.
+
+**Secrets never go in logs.** This repo is public, and so are its GitHub Actions run logs. Both apps mask `/hooks/<secret>/` and `?secret=` in uvicorn's access log (`redact` in `receiver.py` and `slack_app.py`), and the two `fetch-chs-*-logs` workflows mask them again before printing. Before that (until 2026-10-23), fetched Fly logs leaked `P1_TRIGGER_SECRET` and the agent webhook secret into public run logs; those logs were deleted and both secrets rotated.
 
 ## Call coaching and KPI digest (GitHub Actions, 2026-10)
 

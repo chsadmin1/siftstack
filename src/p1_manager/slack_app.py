@@ -61,6 +61,40 @@ from datasift_client import DataSiftClient  # noqa: E402
 
 log = logging.getLogger("p1_slack")
 
+
+# Never log a secret. uvicorn's access log prints every request's full path
+# and query string, which here carries the webhook secret (/hooks/<secret>/...)
+# or the trigger secret (?secret=...). Those logs are fetched into GitHub
+# Actions run logs, which are public on this repo, and that is how both
+# secrets leaked in October 2026. Everything below masks them before any
+# handler sees the line.
+import re as _re
+
+_SECRET_IN_URL = _re.compile(r"(secret=)[^&\s\"']+|(/hooks/)[^/\s\"']+(?=/)")
+
+
+def redact(text: str) -> str:
+    return _SECRET_IN_URL.sub(lambda m: (m.group(1) or m.group(2)) + "***", text)
+
+
+class _RedactSecrets(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and record.args:
+            record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        return True
+
+
+def _install_redaction() -> None:
+    for name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+        lg = logging.getLogger(name)
+        if not any(isinstance(f, _RedactSecrets) for f in lg.filters):
+            lg.addFilter(_RedactSecrets())
+
+
+_install_redaction()
+
 SLACK_API = "https://slack.com/api"
 MAX_SAMPLE_ADDRESSES = 8
 
@@ -365,6 +399,7 @@ app = FastAPI(title="P1 List Manager", docs_url=None, redoc_url=None)
 def _startup() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _install_redaction()
     log.info("P1 List Manager receiver up")
     if os.environ.get("P1_INLINE_SCHEDULER", "1").strip() in ("1", "true", "yes", "on"):
         _start_inline_scheduler()
@@ -532,7 +567,11 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
         import asyncio
 
         import smrtphone_keeper
-        outcome = await asyncio.to_thread(smrtphone_keeper.run_check, post_to_channel, force)
+        try:
+            outcome = await asyncio.to_thread(smrtphone_keeper.run_check, post_to_channel, force)
+        except Exception as exc:  # noqa: BLE001 - report, never a bare 500
+            log.exception("smrtphone trigger failed")
+            outcome = {"status": "error", "detail": exc.__class__.__name__}
         return JSONResponse({"ok": True, "job": job, "force": force, **outcome})
 
     import schedule

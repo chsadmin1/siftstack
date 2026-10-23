@@ -30,11 +30,46 @@ log = logging.getLogger(__name__)
 app = FastAPI(title="SiftStack SMS agent", docs_url=None, redoc_url=None)
 
 
+# Never log a secret. uvicorn's access log prints every request's full path
+# and query string, which here carries the webhook secret (/hooks/<secret>/...)
+# or the trigger secret (?secret=...). Those logs are fetched into GitHub
+# Actions run logs, which are public on this repo, and that is how both
+# secrets leaked in October 2026. Everything below masks them before any
+# handler sees the line.
+import re as _re
+
+_SECRET_IN_URL = _re.compile(r"(secret=)[^&\s\"']+|(/hooks/)[^/\s\"']+(?=/)")
+
+
+def redact(text: str) -> str:
+    return _SECRET_IN_URL.sub(lambda m: (m.group(1) or m.group(2)) + "***", text)
+
+
+class _RedactSecrets(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and record.args:
+            record.args = tuple(redact(a) if isinstance(a, str) else a for a in record.args)
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        return True
+
+
+def _install_redaction() -> None:
+    for name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+        lg = logging.getLogger(name)
+        if not any(isinstance(f, _RedactSecrets) for f in lg.filters):
+            lg.addFilter(_RedactSecrets())
+
+
+_install_redaction()
+
+
 @app.on_event("startup")
 def _startup() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    _install_redaction()
     store.init()
     gaps = config.missing()
     if gaps:
