@@ -3,17 +3,19 @@
 # Its own Fly app on CHS's Fly.io account, with CHS's DataSift account, Slack
 # channel and Anthropic key.
 #
-# SPLIT PHONE SYSTEMS (Dan, 2026-10-14): CHS TEXTS through smrtPhone and
-# CALLS through Kixie.
-#   * Texting: SMS_AGENT_PROVIDER=smrtphone. Sends use smrtPhone's API, and
-#     smrtPhone's SMS webhooks go to POST /hooks/{secret}/smrtphone.
-#   * Calling: Kixie's End Call (and Call Disposition) webhooks go to
-#     POST /hooks/{secret}/kixie. engine.handle_call_ended pauses the texting
-#     thread when a rep has a real call with that seller, whichever provider
-#     sends the texts, and the call coaching job reads the same events
-#     (src/sms_agent/call_log.py). Kixie's SMS webhook is NOT used.
-#   * SMS_AGENT_CALL_LOG_POLL=0: smrtPhone's call log is empty for this team,
-#     so the smrtPhone call-takeover poll is off and Kixie's webhook does it.
+# ONE PHONE SYSTEM (2026-10-23): CHS TEXTS and CALLS through smrtPhone.
+#   * Texting: sends use smrtPhone's API, and smrtPhone's SMS webhooks go to
+#     POST /hooks/{secret}/smrtphone.
+#   * Calling: smrtPhone has no webhook for a finished call, so the agent reads
+#     smrtPhone's call log every 5 minutes (call_takeover.py) and pauses the
+#     texting thread when a rep has a real call with that seller. The daily
+#     call coaching job reads the same log through GET /hooks/{secret}/calls
+#     (src/sms_agent/call_log.py).
+#   * The call log and the SMS log are only readable through a saved smrtPhone
+#     browser login at /data/smrtphone_state.json. Capture it with
+#     src/call_coaching/smrtphone_login.py and put it on the volume with the
+#     "Upload smrtPhone session" GitHub workflow. Until it is there, the
+#     startup log lists it as a config gap and those sweeps log a warning.
 #
 # Market is Ada + Canyon counties, Idaho (Boise area), so every clock here is
 # Mountain time. The code defaults are Eastern and would text Idaho sellers
@@ -29,8 +31,7 @@
 # Secrets (pushed by .github/workflows/deploy-chs-sms-agent.yml, never here):
 # ANTHROPIC_API_KEY, SMRTPHONE_API_KEY, REISIFT_API_KEY, DATASIFT_EMAIL/PASSWORD,
 # SMS_AGENT_SLACK_WEBHOOK, SMS_AGENT_WEBHOOK_SECRET, SMS_AGENT_NUMBERS (the
-# smrtPhone sending pool) and SMS_AGENT_REP_NUMBERS (Kixie number -> rep, for
-# call coaching).
+# smrtPhone sending pool).
 
 app = 'chs-sms-agent'
 primary_region = 'iad'
@@ -39,7 +40,6 @@ primary_region = 'iad'
   dockerfile = 'deploy/Dockerfile'
 
 [env]
-  SMS_AGENT_PROVIDER = 'smrtphone'
   SMS_AGENT_TRANSPORT = 'api'
   # The image bundles config/slack_ids.json (placeholder ids in this repo) as a
   # fallback layer under the volume copy. Off, so only real CHS ids are used.
@@ -65,16 +65,18 @@ primary_region = 'iad'
   # the CHS Slack app (SMS_AGENT_SLACK_BOT_TOKEN, which must be a member).
   SMS_AGENT_SLACK_CHANNEL = 'C0C74TX29E2'
   SMS_AGENT_BUSINESS_TZ = 'America/Boise'
-  # Calls are on Kixie, so the smrtPhone call-log poll and the voicemail
-  # follow-up (which reads smrtPhone call dispositions) have nothing to read.
-  SMS_AGENT_CALL_LOG_POLL = '0'
+  # Calls are in smrtPhone, so the call-log sweep is what pauses a thread
+  # when a rep phones the seller.
+  SMS_AGENT_CALL_LOG_POLL = '1'
+  # Voicemail follow-up texts a seller after a rep leaves a voicemail, read
+  # from smrtPhone's call dispositions. Off until the team decides it wants it.
   SMS_AGENT_VM_FOLLOWUP = '0'
-  # The SMS-log reconcile backstop catches replies whose smrtPhone webhook was
-  # dropped, but it reads the log through a captured smrtPhone browser session
-  # (/data/smrtphone_state.json from _api/smrtphone_login.py), which this
-  # volume does not have yet. Set to '300' once that file is on the volume.
+  # The saved smrtPhone login every log sweep reads (see the header).
   SMRTPHONE_STATE_FILE = '/data/smrtphone_state.json'
-  SMS_AGENT_RECONCILE_INTERVAL = '0'
+  # Every 5 minutes: the SMS-log reconcile backstop (replies whose smrtPhone
+  # webhook was dropped) and, on the same timer, the call-log sweep above.
+  # '0' would switch off both, including call takeover.
+  SMS_AGENT_RECONCILE_INTERVAL = '300'
   # The daily-35 picker is upstream-specific (its own caller and SiftLine boards).
   DAILY25_ENABLED = '0'
 

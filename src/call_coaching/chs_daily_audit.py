@@ -1,11 +1,12 @@
-"""kixie_daily_audit.py - unattended daily call coaching on Kixie calls.
+"""chs_daily_audit.py - unattended daily call coaching on CHS's smrtPhone calls.
 
-The Kixie, no-human-in-the-loop version of daily_audit.py + DAILY_AUDIT_PROMPT.md:
+The no-human-in-the-loop version of daily_audit.py + DAILY_AUDIT_PROMPT.md:
 
-  1. Pull yesterday's calls from the CHS SMS agent, which already receives
-     every Kixie end-call webhook (GET /hooks/{secret}/calls, see
-     src/sms_agent/call_log.py). Kixie puts the recording URL in that webhook,
-     so there is no dialer login to capture or expire.
+  1. Pull yesterday's calls from the CHS SMS agent (GET /hooks/{secret}/calls,
+     see src/sms_agent/call_log.py). The agent reads smrtPhone's call log
+     through the login saved on its volume, and each row carries a direct
+     recording URL on rec.smrtphone.io, so this runner needs no smrtPhone
+     login of its own.
   2. Keep real conversations (recording + duration floor), skip calls already
      on the sheet (the sheet's "Call ID" column is the de-dup ledger, because
      the GitHub Actions runner has no disk between runs), and randomly sample
@@ -16,9 +17,13 @@ The Kixie, no-human-in-the-loop version of daily_audit.py + DAILY_AUDIT_PROMPT.m
   4. Append one row per graded call to the CHS call-audit Google Sheet and
      post a summary to the CHS Slack channel.
 
+If the agent's smrtPhone login has expired, step 1 fails and the Slack post
+says so, with what to do (capture a new login with smrtphone_login.py and run
+the "Upload smrtPhone session" workflow).
+
 Env (GitHub repo secrets in CI, or .env locally):
   SMS_AGENT_URL                 e.g. https://chs-sms-agent.fly.dev
-  SMS_AGENT_WEBHOOK_SECRET      same secret the Kixie webhooks use
+  SMS_AGENT_WEBHOOK_SECRET      the agent's webhook secret
   OPENROUTER_API_KEY            transcription
   ANTHROPIC_API_KEY             grading
   GOOGLE_SERVICE_ACCOUNT_KEY    base64 service-account JSON, Editor on the sheet
@@ -26,14 +31,15 @@ Env (GitHub repo secrets in CI, or .env locally):
   SLACK_CALL_AUDIT_WEBHOOK_URL  CHS Slack incoming webhook
   CALL_COACH_TZ                 default America/Boise
   CALL_COACH_REP_ROLES          optional JSON {"rep name": "lead_management"} to pin a
-                                rep to a rubric (cold_call | lead_management | closing)
+                                rep to a rubric (cold_call | lead_management | closing).
+                                Rep names are smrtPhone user names.
   CALL_COACH_EXCLUDE            optional comma list of rep names never reviewed
 
 USAGE:
-  python src/call_coaching/kixie_daily_audit.py --init-sheet       # write the header row once
-  python src/call_coaching/kixie_daily_audit.py --dry-run          # show the sample only, no cost
-  python src/call_coaching/kixie_daily_audit.py                    # yesterday, 3 per rep
-  python src/call_coaching/kixie_daily_audit.py --date 2026-10-06 --per-rep 5
+  python src/call_coaching/chs_daily_audit.py --init-sheet       # write the header row once
+  python src/call_coaching/chs_daily_audit.py --dry-run          # show the sample only, no cost
+  python src/call_coaching/chs_daily_audit.py                    # yesterday, 3 per rep
+  python src/call_coaching/chs_daily_audit.py --date 2026-10-06 --per-rep 5
 """
 from __future__ import annotations
 
@@ -43,6 +49,7 @@ import json
 import os
 import random
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -107,20 +114,30 @@ def fetch_calls(day: datetime.date) -> list[dict]:
     if not base or not secret:
         raise RuntimeError("SMS_AGENT_URL and SMS_AGENT_WEBHOOK_SECRET are required")
     start = datetime.datetime.combine(day, datetime.time.min, TZ).astimezone(datetime.timezone.utc)
-    # Webhooks land seconds after the call ends; pad the window and filter on
-    # the call's own timestamp below.
+    # Pad the window and filter on the call's own start time below, so a
+    # clock skew between smrtPhone and the agent cannot drop a call.
     since = (start - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
     until = (start + datetime.timedelta(days=1, hours=2)).isoformat(timespec="seconds")
     url = f"{base}/hooks/{secret}/calls?" + urllib.parse.urlencode({"since": since, "until": until})
     last = None
     for _ in range(3):  # Fly's edge often drops the first request after idle
         try:
-            with urllib.request.urlopen(urllib.request.Request(url), timeout=60) as r:
+            with urllib.request.urlopen(urllib.request.Request(url), timeout=120) as r:
                 data = json.loads(r.read())
             return [c for c in data.get("calls", []) if local_date(c.get("created_at_utc")) == day]
+        except urllib.error.HTTPError as e:
+            # The agent answers 503 with a reason when smrtPhone cannot be
+            # read. An expired login is not transient, so say it and stop.
+            try:
+                body = json.loads(e.read() or b"{}")
+            except ValueError:
+                body = {}
+            if body.get("error") == "smrtphone_session":
+                raise RuntimeError(body.get("detail") or "smrtPhone login is missing or expired") from None
+            last = f"HTTP {e.code} {body.get('detail') or ''}".strip()
         except Exception as e:  # noqa: BLE001
             last = e
-    raise RuntimeError(f"could not reach the SMS agent call log: {last}")
+    raise RuntimeError(f"could not read the smrtPhone call log from the SMS agent: {last}")
 
 
 def qualifies(call: dict, min_seconds: int) -> bool:
@@ -208,7 +225,7 @@ def slack_summary(day: datetime.date, rows: list[dict], found: int, failures: in
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Daily Kixie call coaching -> sheet + Slack")
+    ap = argparse.ArgumentParser(description="Daily smrtPhone call coaching -> sheet + Slack")
     ap.add_argument("--date", help="YYYY-MM-DD in CALL_COACH_TZ; default yesterday")
     ap.add_argument("--per-rep", type=int, default=DEFAULT_PER_REP)
     ap.add_argument("--min-seconds", type=int, default=DEFAULT_MIN_SECONDS)
@@ -221,7 +238,7 @@ def main() -> int:
         return init_sheet()
 
     day = target_date(args.date)
-    print(f"Kixie call coaching for {day.isoformat()} ({TZ.key})")
+    print(f"smrtPhone call coaching for {day.isoformat()} ({TZ.key})")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -330,7 +347,7 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    (OUT_DIR / "kixie_audit_rows.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    (OUT_DIR / "chs_audit_rows.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
     sheet_url = ""
     if rows:
         result = append_audit_row.append(rows, notify=False)

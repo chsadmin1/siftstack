@@ -1,8 +1,9 @@
 name: Deploy CHS SMS agent
 
 # Bootstrap + deploy of chs-sms-agent -- Creative Home Solutions' two-way SMS
-# agent. It texts through smrtPhone and takes call events from Kixie, where
-# the team dials (see fly.chs-sms-agent.toml). Runs on GitHub's infrastructure for the same
+# agent. It texts through smrtPhone and reads smrtPhone's call log to see
+# when a rep has called a seller (see fly.chs-sms-agent.toml). Runs on
+# GitHub's infrastructure for the same
 # reason as deploy-chs-p1-manager.yml: local flyctl cannot reliably reach
 # Fly's API from the office machine. App and volume creation no-op once they
 # exist, so this is also the ongoing redeploy path.
@@ -15,7 +16,7 @@ name: Deploy CHS SMS agent
 # Required repo secrets: FLY_API_TOKEN, DATASIFT_EMAIL, DATASIFT_PASSWORD,
 # SMS_AGENT_WEBHOOK_SECRET.
 # Optional until go-live: ANTHROPIC_API_KEY, SMRTPHONE_API_KEY, REISIFT_API_KEY,
-# SLACK_WEBHOOK_URL, SMS_AGENT_NUMBERS, SMS_AGENT_REP_NUMBERS. Each also
+# SLACK_WEBHOOK_URL, SMS_AGENT_NUMBERS. Each also
 # accepts a CHS_-prefixed name, which is how several are stored here.
 
 on:
@@ -64,7 +65,6 @@ jobs:
           REISIFT_API_KEY: ${{ secrets.REISIFT_API_KEY || secrets.CHS_REISIFT_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SMS_AGENT_NUMBERS: ${{ secrets.SMS_AGENT_NUMBERS || secrets.CHS_SMS_NUMBERS }}
-          SMS_AGENT_REP_NUMBERS: ${{ secrets.SMS_AGENT_REP_NUMBERS }}
           SMS_AGENT_CANARY_NUMBERS: ${{ secrets.SMS_AGENT_CANARY_NUMBERS }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
@@ -87,9 +87,6 @@ jobs:
           add SLACK_WEBHOOK_URL SMS_AGENT_SLACK_WEBHOOK
           # smrtPhone sending pool as JSON, e.g. {"Nick": ["+12085550100"]}.
           add SMS_AGENT_NUMBERS SMS_AGENT_NUMBERS
-          # Which rep owns each Kixie number, for call coaching, e.g.
-          # {"+12085550100": "Nick"}. Optional; see src/sms_agent/call_log.py.
-          add SMS_AGENT_REP_NUMBERS SMS_AGENT_REP_NUMBERS
           # Team phones allowed to receive the go-live test text
           # (POST /hooks/<secret>/canary). Comma separated.
           add SMS_AGENT_CANARY_NUMBERS SMS_AGENT_CANARY_NUMBERS

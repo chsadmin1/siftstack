@@ -1,8 +1,9 @@
-"""CHS call coaching on Kixie + the KPI digest bot, with zero network.
+"""CHS call coaching on smrtPhone + the KPI digest bot, with zero network.
 
-  * src/sms_agent/call_log.py turns stored Kixie end-call webhooks into the
-    call dicts the coaching engine reads (recording URL, rep, contact).
-  * src/call_coaching/kixie_daily_audit.py samples, grades, writes rows and
+  * src/sms_agent/call_log.py turns smrtPhone call-log rows into the call
+    dicts the coaching engine reads (recording URL, rep, contact), and
+    call_takeover.py pauses a texting thread when a rep calls that seller.
+  * src/call_coaching/chs_daily_audit.py samples, grades, writes rows and
     builds the Slack summary; every outside call is stubbed.
   * src/kpi_bot/kpi_slack_bot.py builds its Slack message from a fake sheet,
     including the per-rep section and the header-whitespace fix.
@@ -20,91 +21,79 @@ ROOT = Path(__file__).resolve().parents[1]
 _tmp = tempfile.mkdtemp()
 os.environ["SMS_AGENT_DB"] = str(Path(_tmp) / "agent.db")
 os.environ["SMS_AGENT_DATA_DIR"] = _tmp
-# CHS texts through smrtPhone and calls through Kixie (fly.chs-sms-agent.toml).
-os.environ["SMS_AGENT_PROVIDER"] = "smrtphone"
-os.environ["SMS_AGENT_CALL_LOG_POLL"] = "0"
+# CHS texts and calls through smrtPhone (fly.chs-sms-agent.toml).
+os.environ["SMS_AGENT_CALL_LOG_POLL"] = "1"
 os.environ["SMS_AGENT_PHASE"] = "1"
 os.environ["SMS_AGENT_NUMBERS"] = json.dumps({"Nick": ["+12085550100"]})
-os.environ["SMS_AGENT_REP_NUMBERS"] = json.dumps({"+12085550100": "Nick"})
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "call_coaching"))
 sys.path.insert(0, str(ROOT / "src" / "kpi_bot"))
 
-from src.sms_agent import call_log, kixie, store  # noqa: E402
-
-ENDCALL = {
-    "hookevent": "endcall",
-    "businessid": 1,
-    "customernumber": "+12085559999",
-    "businessnumber": "+12085550100",
-    "data": {
-        "callDetails": {
-            "callid": "abc-123",
-            "calldate": "2026-10-06T18:47:15.000Z",
-            "fromnumber": "+12085550100",
-            "tonumber": "+12085559999",
-            "duration": 184,
-            "calltype": "outgoing",
-            "callstatus": "answered",
-            "recordingurl": "https://calls.kixie.com/12345.mp3",
-            "disposition": "not disposed",
-            "fname": "Jane",
-            "lname": "Seller",
-            "calleridName": "Creative Home",
-            "crmlink": "https://app.reisift.io/x",
-        }
-    },
-}
+from src.sms_agent import call_log, store  # noqa: E402
 
 
-def _ingest(raw):
-    ev = kixie.normalize_webhook(raw)
-    store.record_event("kixie", ev["event"], f"kixie:{ev['event']}:{ev.get('callId')}", ev)
+def _row(cid, created, to="+12085559999", secs=184, direction="outbound"):
+    """One smrtPhone call-log row, in the shapes verified live 2026-08-28."""
+    return {
+        "id": cid,
+        "user": {"id": 7, "name": "Nick"},
+        "created_at": {"date": f"{created}.000000", "timezone_type": 3, "timezone": "UTC"},
+        "direction": direction,
+        "status": "completed",
+        "disposition": "Correct Number",
+        "from_num": {"fromNum": "+12085550100", "userName": "Nick - 1"},
+        "to_num": {"toNum": to, "contactName": "Jane Seller"},
+        "duration": str(secs),
+        "podio_id": "https://app.reisift.io/records/properties/11111111-2222-3333-4444-555555555555",
+        "recording_sid": {"hasRec": "https://rec.smrtphone.io/abc-123.mp3", "viewRoute": "/logs/calls/abc"},
+    }
 
 
-def test_call_log_from_endcall_webhook():
+def test_call_log_from_smrtphone_rows():
     store.init()
-    _ingest(ENDCALL)
-    _ingest({"hookevent": "disposition", "data": {"callid": "abc-123", "disposition": "Correct Number"}})
-    calls = call_log.calls_between("2000-01-01T00:00:00", "2100-01-01T00:00:00")
+    pages = {0: [_row("abc-123", "2026-10-06 18:47:15")]}
+    calls = call_log.calls_between("2026-10-06T00:00:00Z", "2026-10-07T00:00:00Z",
+                                   fetch_page=lambda n: pages.get(n, []))
     assert len(calls) == 1, calls
     c = calls[0]
     assert c["call_id"] == "abc-123"
-    assert c["caller"] == "Nick", c["caller"]  # rep map beats calleridName
-    assert c["recording_url"] == "https://calls.kixie.com/12345.mp3"
+    assert c["caller"] == "Nick", c["caller"]  # smrtPhone's own user name
+    assert c["recording_url"] == "https://rec.smrtphone.io/abc-123.mp3"
     assert c["duration_seconds"] == 184
     assert c["created_at_utc"] == "2026-10-06 18:47:15"
     assert c["from_num"] == "+12085550100" and c["to_num"] == "+12085559999"
+    assert c["contact_phone"] == "+12085559999"
     assert c["contact_name"] == "Jane Seller"
-    assert c["disposition"] == "Correct Number"  # the later disposition webhook wins
+    assert c["disposition"] == "Correct Number"
+    assert "11111111-2222-3333-4444-555555555555" in c["reisift_record_url"]
 
 
-def test_kixie_call_pauses_smrtphone_text_thread():
-    """The split setup's key guarantee: a rep's real Kixie call stops the
-    smrtPhone texting thread with that seller."""
-    from src.sms_agent import config, engine
-    assert config.PROVIDER == "smrtphone"
+def test_smrtphone_call_pauses_text_thread():
+    """A rep's real smrtPhone call stops the texting thread with that seller."""
+    from src.sms_agent import call_takeover
     store.init()
     store.ensure_conversation("2085557777")
-    raw = json.loads(json.dumps(ENDCALL))
-    raw["customernumber"] = "+12085557777"
-    raw["data"]["callDetails"].update(callid="call-777", tonumber="+12085557777", duration=95)
-    out = engine.process("kixie", kixie.normalize_webhook(raw))
-    assert out.get("action") == "call_takeover", out
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    orig = call_takeover.fetch_calls
+    call_takeover.fetch_calls = lambda pages=2, per_page=200: [_row("call-777", now, to="+12085557777", secs=95)]
+    try:
+        out = call_takeover.run(pages=1, hours=6, apply=True)
+    finally:
+        call_takeover.fetch_calls = orig
+    assert out.get("paused") == 1, out
     assert store.get_conversation("2085557777")["state"] == "paused"
 
 
-def test_smrtphone_call_log_poll_is_off():
-    """Calls never appear in smrtPhone's log here, so the worker must not poll it."""
+def test_worker_sweeps_smrtphone_call_log():
+    """Calls are in smrtPhone, so the worker reads its call log on the reconcile timer."""
     from src.sms_agent import config, worker
-    assert config.CALL_LOG_POLL is False
+    assert config.CALL_LOG_POLL is True
     import src.sms_agent.call_takeover as ct
-    called = []
-    orig_ct, orig_rc = ct.run, None
-    ct.run = lambda **k: called.append(k) or {}
     import src.sms_agent.reconcile as rc
-    orig_rc = rc.run
+    called = []
+    orig_ct, orig_rc = ct.run, rc.run
+    ct.run = lambda **k: called.append(k) or {}
     rc.run = lambda **k: {}
     old_interval = config.RECONCILE_INTERVAL
     config.RECONCILE_INTERVAL = 1
@@ -113,20 +102,39 @@ def test_smrtphone_call_log_poll_is_off():
         worker.run_once(with_reconcile=True)
     finally:
         ct.run, rc.run, config.RECONCILE_INTERVAL = orig_ct, orig_rc, old_interval
-    assert called == []
+    assert called == [{"pages": 1, "hours": 6}], called
 
 
-def test_call_outcome_variants_are_dispositions():
-    base = {"data": {"callid": "368131317", "disposition": "Correct Number", "phone": "+12085559999",
-                     "callDetails": {"callid": "uuid-1", "disposition": "Correct Number"}}}
-    for hook in ("disposition", "calloutcome", None):
-        raw = json.loads(json.dumps(base))
-        if hook:
-            raw["data"]["hookevent"] = hook
-        ev = kixie.normalize_webhook(raw)
-        assert ev["event"] == "kixie:disposition", (hook, ev["event"])
-        assert ev["callId"] == "uuid-1"  # the UUID that End Call also uses
-        assert ev["disposition"] == "Correct Number"
+def test_expired_smrtphone_login_is_named_in_the_error():
+    """The coaching job says the login expired, rather than 'could not reach'."""
+    import io
+    import urllib.error
+    A = _audit_module()
+    body = json.dumps({"ok": False, "error": "smrtphone_session",
+                       "detail": "smrtPhone login is missing or expired. Run the 'Upload smrtPhone session' workflow."})
+    attempts = []
+
+    def fake_urlopen(req, timeout=0):
+        attempts.append(req)
+        raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, io.BytesIO(body.encode()))
+
+    old = (A.urllib.request.urlopen, os.environ.get("SMS_AGENT_URL"), os.environ.get("SMS_AGENT_WEBHOOK_SECRET"))
+    A.urllib.request.urlopen = fake_urlopen
+    os.environ["SMS_AGENT_URL"], os.environ["SMS_AGENT_WEBHOOK_SECRET"] = "https://agent.example", "s3cret"
+    try:
+        A.fetch_calls(datetime.date(2026, 10, 6))
+        raised = ""
+    except RuntimeError as e:
+        raised = str(e)
+    finally:
+        A.urllib.request.urlopen = old[0]
+        for k, v in (("SMS_AGENT_URL", old[1]), ("SMS_AGENT_WEBHOOK_SECRET", old[2])):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert "Upload smrtPhone session" in raised, raised
+    assert len(attempts) == 1, "an expired login is not retried"
 
 
 def test_canary_only_texts_allowlisted_team_phones():
@@ -207,11 +215,13 @@ def test_slack_bot_joins_channel_on_not_in_channel():
 
 
 def test_call_log_window_excludes_other_days():
-    assert call_log.calls_between("2000-01-01T00:00:00", "2000-01-02T00:00:00") == []
+    rows = [_row("late", "2026-10-08 12:00:00"), _row("early", "2026-10-05 12:00:00")]
+    assert call_log.calls_between("2026-10-06T00:00:00Z", "2026-10-07T00:00:00Z",
+                                  fetch_page=lambda n: rows if n == 0 else []) == []
 
 
 def _audit_module():
-    import kixie_daily_audit as A
+    import chs_daily_audit as A
     return A
 
 
@@ -336,7 +346,7 @@ def test_kpi_bot_message():
             ["Amy", d, "4", "40", "9", "3"],
         ],
         "Dialer": [["Date", "Caller", "Dials", "New Lead", "Talk Time (hour)"], [d, "Nick", "150", "2", "1.5"]],
-        "Expenses": [["DATE", "Expense Type", "DESCRIPTION", "AMOUNT"], [d, "Software", "Kixie", "$95"]],
+        "Expenses": [["DATE", "Expense Type", "DESCRIPTION", "AMOUNT"], [d, "Software", "smrtPhone", "$95"]],
     })
     msg = K.build_slack_message(sheet)
     text = json.dumps(msg, ensure_ascii=False)

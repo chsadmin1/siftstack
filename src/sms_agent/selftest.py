@@ -89,8 +89,6 @@ def run(live_model: bool = False) -> int:
     r = Results()
 
     # ---- stub every outbound edge -------------------------------------
-    # Kept so the provider routing itself can be asserted (section 13).
-    real_transport_send = transport.send
     transport.send = lambda to, body, frm="": (
         stub.sent.append((to, body, frm)) or smrtphone.SendResult(True, sms_id="stub")
     )
@@ -1438,167 +1436,132 @@ def run(live_model: bool = False) -> int:
     except ImportError as exc:
         r.check("fastapi TestClient available", False, str(exc))
 
-    # ---- 13. Kixie ---------------------------------------------------------
-    # The Creative Home Solutions deployment texts through Kixie. Every Kixie
-    # payload is translated into the smrtPhone-shaped event on the way in, so
-    # these checks pin the translation, the takeover rules it feeds, the exact
-    # send request, and that nothing credential-shaped reaches the event log.
+    # ---- 13. smrtPhone calls ----------------------------------------------
+    # CHS calls and texts through smrtPhone. smrtPhone has no webhook for a
+    # finished call, so call takeover and the coaching call log both read the
+    # web app's call log through a saved login. These checks pin the row
+    # translation, the window paging, the login upload, and the startup
+    # warning when no login has been saved.
     print()
-    print("kixie provider")
+    print("smrtphone calls")
     import json as _json
 
-    from . import kixie
+    from . import call_log
 
-    saved = {k: getattr(config, k) for k in (
-        "PROVIDER", "KIXIE_API_KEY", "KIXIE_BUSINESS_ID", "KIXIE_AGENT_EMAIL", "KIXIE_TEAM_SMS_ID")}
-    config.KIXIE_AGENT_EMAIL = "nick@example.com"
+    uuid36 = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+
+    def _row(cid, created, direction="outbound", secs=95, rec=True, tz="UTC"):
+        ours, theirs = "+12085550199", "+12085550111"
+        return {
+            "id": cid,
+            "user": {"id": 1, "name": "Nick Smith"},
+            "created_at": {"date": f"{created}.000000", "timezone_type": 3, "timezone": tz},
+            "direction": direction, "status": "completed", "disposition": "Correct Number",
+            "from_num": {"fromNum": ours if direction == "outbound" else theirs, "userName": "Nick - 1"},
+            "to_num": {"toNum": theirs if direction == "outbound" else ours, "contactName": "Pat Seller"},
+            "duration": str(secs),
+            "podio_id": f'<a href="https://app.reisift.io/records/properties/{uuid36}">open</a>',
+            "recording_sid": ({"hasRec": "https://rec.smrtphone.io/r/abc.mp3", "viewRoute": "/logs/calls/1"}
+                              if rec else {"hasRec": False}),
+        }
+
+    out = call_log.to_call(_row("c-1", "2026-10-20 18:00:00"))
+    r.check("smrtPhone row: rep is the smrtPhone user", out["caller"] == "Nick Smith", out["caller"])
+    r.check("smrtPhone row: outbound seller is the TO number", out["contact_phone"] == "+12085550111",
+            out["contact_phone"])
+    r.check("smrtPhone row: our number is FROM", out["from_num"] == "+12085550199", out["from_num"])
+    r.check("smrtPhone row: duration, disposition and contact carried",
+            out["duration_seconds"] == 95 and out["disposition"] == "Correct Number"
+            and out["contact_name"] == "Pat Seller", str(out))
+    r.check("smrtPhone row: direct recording URL", out["recording_url"] == "https://rec.smrtphone.io/r/abc.mp3",
+            out["recording_url"])
+    r.check("smrtPhone row: DataSift record from the dialer's own link",
+            uuid36 in out["reisift_record_url"] and out["crm_link"].startswith("https://app.reisift.io/records/"),
+            str((out["reisift_record_url"], out["crm_link"])))
+    inbound = call_log.to_call(_row("c-2", "2026-10-20 18:00:00", direction="inbound"))
+    r.check("smrtPhone row: inbound seller is the FROM number", inbound["contact_phone"] == "+12085550111",
+            inbound["contact_phone"])
+    r.check("smrtPhone row: no recording reads as empty, not False",
+            call_log.to_call(_row("c-3", "2026-10-20 18:00:00", rec=False))["recording_url"] == "")
+    r.check("smrtPhone row without an id is dropped", call_log.to_call({"duration": "90"}) is None)
+    boise = call_log.to_call(_row("c-4", "2026-10-20 09:00:00", tz="America/Boise"))
+    r.check("a named smrtPhone timezone converts to UTC", boise["created_at_utc"] == "2026-10-20 15:00:00",
+            boise["created_at_utc"])
+    offset = call_log.to_call(_row("c-5", "2026-10-20 09:00:00", tz="-06:00"))
+    r.check("an offset smrtPhone timezone converts to UTC", offset["created_at_utc"] == "2026-10-20 15:00:00",
+            offset["created_at_utc"])
+
+    from . import call_takeover
+    saved_raw = config.SMRTPHONE_NUMBERS_RAW
+    config.SMRTPHONE_NUMBERS_RAW = '["+12085550199"]'
     try:
-        inbound = kixie.normalize_webhook({"data": {
-            "hookevent": "sms", "direction": "incoming", "messageid": "kx-1",
-            "customernumber": "+12085550111 ", "businessnumber": " 12085550199",
-            "message": "who is this", "email": "nick%40example.com", "messageDate": "2026-10-06"}})
-        r.check("kixie incoming -> smsIncoming", inbound.get("event") == "smsIncoming", str(inbound.get("event")))
-        r.check("kixie incoming: customer is FROM, padded number cleaned",
-                inbound.get("from") == "+12085550111", repr(inbound.get("from")))
-        r.check("kixie incoming: business number is TO", inbound.get("to") == "+12085550199",
-                repr(inbound.get("to")))
-        r.check("kixie incoming carries message and messageid",
-                inbound.get("message") == "who is this" and inbound.get("smsId") == "kx-1")
+        r.check("takeover: a pool number in E.164 still counts as ours",
+                call_takeover._counterparty(_row("t-1", "2026-10-20 18:00:00")) == "2085550111")
+        rep_line = _row("t-2", "2026-10-20 18:00:00")
+        rep_line["from_num"]["fromNum"] = "+12085550177"  # a rep's dial line, not in the texting pool
+        r.check("takeover: a rep line outside the pool falls back to direction",
+                call_takeover._counterparty(rep_line) == "2085550111")
+    finally:
+        config.SMRTPHONE_NUMBERS_RAW = saved_raw
 
-        ours = kixie.normalize_webhook({"data": {
-            "hookevent": "sms", "direction": "outgoing", "messageid": "kx-2",
-            "customernumber": "2085550111", "businessnumber": "2085550199",
-            "message": "Hi there", "email": "nick%40example.com"}})
-        r.check("kixie outgoing by the API user reads as the API surface",
-                ours.get("event") == "smsOutgoing" and ours.get("source") == "api"
-                and not ours.get("userName"), str({k: ours.get(k) for k in ("event", "source", "userName")}))
-        r.check("kixie outgoing: customer is TO", ours.get("to") == "+12085550111", repr(ours.get("to")))
+    pages = {
+        0: [_row("p-late", "2026-10-21 01:00:00"), _row("p-in-2", "2026-10-20 18:00:00"),
+            _row("p-in-1", "2026-10-20 07:00:00")],
+        1: [_row("p-early", "2026-10-19 23:00:00")],
+        2: [_row("p-never", "2026-10-18 12:00:00")],
+    }
+    read: list[int] = []
 
-        human = kixie.normalize_webhook({"data": {
-            "hookevent": "sms", "direction": "outgoing", "customernumber": "2085550111",
-            "businessnumber": "2085550199", "message": "Hey it's Sam", "email": "sam%40example.com"}})
-        r.check("kixie outgoing by another user is a named human",
-                human.get("source") == "kixie-app" and human.get("userName") == "sam@example.com",
-                str({k: human.get(k) for k in ("source", "userName")}))
+    def _fake_page(n):
+        read.append(n)
+        return pages.get(n, [])
 
-        call = kixie.normalize_webhook({"data": {
-            "hookevent": "endcall", "customernumber": "2085550111",
-            "callDetails": {"callid": "c-9", "duration": "95", "email": "sam%40example.com",
-                            "callstatus": "answered"}}})
-        r.check("kixie endcall -> callEnded with seconds and call id",
-                call.get("event") == "callEnded" and call.get("duration") == 95
-                and call.get("callId") == "c-9", str(call))
+    window = call_log.calls_between("2026-10-20T06:00:00+00:00", "2026-10-21T00:00:00+00:00",
+                                    fetch_page=_fake_page)
+    r.check("calls_between keeps only the window, oldest first",
+            [c["call_id"] for c in window] == ["p-in-1", "p-in-2"], str([c["call_id"] for c in window]))
+    r.check("calls_between stops paging once it passes the window", read == [0, 1], str(read))
 
-        dispo = kixie.normalize_webhook({"data": {
-            "hookevent": "disposition", "customernumber": "2085550111",
-            "activeCRM": {"name": "x", "token": "SECRET-CRM-TOKEN"}}})
-        r.check("kixie payloads are scrubbed of credentials before storage",
-                "SECRET-CRM-TOKEN" not in str(dispo), "activeCRM token leaked into the stored payload")
+    def _expired(n):
+        raise RuntimeError("smrtPhone session expired")
 
-        other = kixie.normalize_webhook({"data": {"hookevent": "voicemail"}})
-        res = engine.process("kixie", other)
-        r.check("unhandled kixie events are stored and ignored, not guessed at",
-                res.get("action") == "ignored", str(res))
+    try:
+        call_log.calls_between("2026-10-20T06:00:00Z", "2026-10-21T00:00:00Z", fetch_page=_expired)
+        raised = ""
+    except call_log.SessionError as exc:
+        raised = str(exc)
+    r.check("an expired login surfaces as SessionError", "expired" in raised, raised or "no error")
 
-        res = engine.process("kixie", inbound)
-        r.check("a kixie inbound runs the normal inbound handler",
-                res.get("action") not in (None, "ignored", "error"), str(res)[:160])
-
-        # Call takeover, webhook form.
-        talk_phone = "2085550142"
-        store.map_phone(talk_phone, record_uuid="rec-kixie", context=ctx)
-        store.ensure_conversation(talk_phone)
-        short = engine.process("kixie", {"event": "callEnded", "phone": talk_phone, "duration": 20})
-        r.check("a short kixie call (voicemail range) is not a takeover",
-                short.get("action") == "ignored", str(short))
-        stranger = engine.process("kixie", {"event": "callEnded", "phone": "2085550999", "duration": 300})
-        r.check("a call to a number we never texted mints nothing",
-                stranger.get("action") == "ignored" and store.get_conversation("2085550999") is None,
-                str(stranger))
-        took = engine.process("kixie", {"event": "callEnded", "phone": talk_phone,
-                                        "duration": 120, "user": "sam@example.com"})
-        conv = store.get_conversation(talk_phone) or {}
-        r.check("a real kixie call pauses the thread",
-                took.get("action") == "call_takeover" and conv.get("state") == "paused",
-                f"{took} state={conv.get('state')}")
-
-        # The exact send request, single-sender mode then Team SMS mode.
-        captured = {}
-
-        class _Resp:
-            def __init__(self, code, body):
-                self.status_code, self._body = code, body
-                self.text = _json.dumps(body)
-
-            def json(self):
-                return self._body
-
-        def _post(url, params=None, json=None, timeout=None):
-            captured.update(url=url, params=params, json=json)
-            return _Resp(200, {"success": True})
-
-        real_post = kixie.requests.post
-        kixie.requests.post = _post
-        config.KIXIE_API_KEY, config.KIXIE_BUSINESS_ID = "kx-key", "10001"
-        config.KIXIE_TEAM_SMS_ID = ""
-        sent = kixie.send_sms("2085550111", "Hi there", "+12085550199")
-        body = captured.get("json") or {}
-        r.check("kixie send accepted on 2xx", sent.ok, sent.error)
-        r.check("kixie send puts the apikey in the query string",
-                (captured.get("params") or {}).get("apikey") == "kx-key", str(captured.get("params")))
-        r.check("kixie single-sender send names the agent user",
-                body.get("eventname") == "sms" and body.get("email") == "nick@example.com"
-                and body.get("businessid") == "10001", str(body))
-        r.check("kixie send target is E.164", body.get("target") == "+12085550111", repr(body.get("target")))
-
-        config.KIXIE_TEAM_SMS_ID = "team-7"
-        kixie.send_sms("2085550111", "Hi there", "+12085550199")
-        body = captured.get("json") or {}
-        r.check("kixie Team SMS send picks the FROM number",
-                body.get("eventname") == "bizsms" and body.get("id") == "team-7"
-                and body.get("fromNumber") == "12085550199" and "email" not in body, str(body))
-        config.KIXIE_TEAM_SMS_ID = ""
-
-        kixie.requests.post = lambda url, params=None, json=None, timeout=None: _Resp(
-            200, {"success": False, "message": "No SMS number assigned to your user account"})
-        refused = kixie.send_sms("2085550111", "Hi there")
-        r.check("a 2xx whose body reports failure is a failed send",
-                not refused.ok and "No SMS number" in refused.error, refused.error)
-
-        calls = {"n": 0}
-
-        def _bad(url, params=None, json=None, timeout=None):
-            calls["n"] += 1
-            return _Resp(401, {"error": "bad key"})
-
-        kixie.requests.post = _bad
-        rejected = kixie.send_sms("2085550111", "Hi there")
-        r.check("a kixie 4xx is not retried", not rejected.ok and calls["n"] == 1,
-                f"attempts={calls['n']} err={rejected.error}")
-        kixie.requests.post = real_post
-
-        # Provider routing.
-        routed = []
-        real_kixie_send = kixie.send_sms
-        kixie.send_sms = lambda to, body, frm="": (routed.append(to) or smrtphone.SendResult(True))
-        config.PROVIDER = "kixie"
-        real_transport_send("2085550111", "Hi there", "+12085550199")
-        r.check("transport sends through kixie when the provider is kixie", routed == ["2085550111"],
-                str(routed))
-        kixie.send_sms = real_kixie_send
-
-        config.KIXIE_API_KEY = ""
+    saved_state = config.SMRTPHONE_STATE_FILE
+    saved_poll = config.CALL_LOG_POLL
+    config.SMRTPHONE_STATE_FILE = str(tmp / "smrtphone_state.json")
+    config.CALL_LOG_POLL = True
+    saved_check = call_log.check_session
+    try:
         gaps = " ".join(config.missing())
-        r.check("doctor flags missing kixie credentials, not smrtPhone ones",
-                "KIXIE_API_KEY" in gaps and "SMRTPHONE_API_KEY" not in gaps, gaps[:200])
-
-        dnt_before = len(stub.dnt)
-        ok, detail, label = engine._provider_dnt("2085550111")
-        r.check("kixie opt-outs never call the smrtPhone DNT route",
-                label == "Kixie DNT" and not ok and len(stub.dnt) == dnt_before, f"{label} {detail}")
-        config.PROVIDER = "smrtphone"
-        _, _, label = engine._provider_dnt("2085550111")
-        r.check("smrtPhone deployments still use smrtPhone DNT", label == "smrtPhone DNT", label)
+        r.check("startup warns when no smrtPhone login is saved", "SMRTPHONE_STATE_FILE" in gaps, gaps[:200])
+        n = call_log.save_session({"cookies": [
+            {"name": "laravel_session", "value": "s1", "domain": "phone.smrt.studio"},
+            {"name": "XSRF-TOKEN", "value": "s2", "domain": ".smrt.studio"},
+            {"name": "_ga", "value": "x", "domain": ".google.com"}],
+            "origins": [{"origin": "https://phone.smrt.studio", "localStorage": []},
+                        {"origin": "https://example.com", "localStorage": []}]})
+        stored = _json.loads(Path(config.SMRTPHONE_STATE_FILE).read_text(encoding="utf-8"))
+        r.check("login upload keeps only smrtPhone cookies", n == 2
+                and {c["domain"] for c in stored["cookies"]} == {"phone.smrt.studio", ".smrt.studio"},
+                str(stored["cookies"]))
+        r.check("login upload keeps only smrtPhone localStorage",
+                [o["origin"] for o in stored["origins"]] == ["https://phone.smrt.studio"], str(stored["origins"]))
+        gaps = " ".join(config.missing())
+        r.check("the startup warning clears once a login is saved", "SMRTPHONE_STATE_FILE" not in gaps, gaps[:200])
+        r.check("a bare cookie list is accepted",
+                call_log.save_session([{"name": "a", "value": "b", "domain": "phone.smrt.studio"}]) == 1)
+        try:
+            call_log.save_session({"cookies": [{"name": "_ga", "value": "x", "domain": ".google.com"}]})
+            rejected = False
+        except ValueError:
+            rejected = True
+        r.check("an upload with no smrtPhone cookies is refused", rejected)
 
         # The bundled 525 Slack ids must be switchable off for another business.
         saved_bundled = config.BUNDLED_CONFIG
@@ -1617,27 +1580,59 @@ def run(live_model: bool = False) -> int:
                 str(merged))
         config.BUNDLED_CONFIG = saved_bundled
 
-        # The HTTP route.
+        # The HTTP routes.
         try:
             from fastapi.testclient import TestClient
 
             from . import receiver
 
             config.WEBHOOK_SECRET = "selftest-secret"
+            call_log.check_session = lambda: (True, "stub")
+            saved_between = call_log.calls_between
             with TestClient(receiver.app) as client:
-                resp = client.post("/hooks/wrong-secret/kixie", json={"data": {}})
-                r.check("kixie endpoint rejects a wrong secret", resp.status_code == 404,
+                good_state = {"cookies": [{"name": "laravel_session", "value": "s", "domain": "phone.smrt.studio"}]}
+                resp = client.post("/hooks/wrong-secret/smrtphone-session", json=good_state)
+                r.check("login upload rejects a wrong secret", resp.status_code == 404, f"got {resp.status_code}")
+                resp = client.post("/hooks/selftest-secret/smrtphone-session", content=b"{not json")
+                r.check("login upload refuses a body that is not JSON", resp.status_code == 400,
                         f"got {resp.status_code}")
-                resp = client.post("/hooks/selftest-secret/kixie", json={"data": {
-                    "hookevent": "sms", "direction": "incoming", "messageid": "kx-http-1",
-                    "customernumber": "2085550123", "businessnumber": "2085550199", "message": "hi"}})
-                r.check("kixie endpoint accepts and persists a post",
-                        resp.status_code == 200 and bool(resp.json().get("event_id")), str(resp.json()))
+                resp = client.post("/hooks/selftest-secret/smrtphone-session", json={"cookies": []})
+                r.check("login upload refuses a body with no smrtPhone cookies", resp.status_code == 400,
+                        f"got {resp.status_code}")
+                resp = client.post("/hooks/selftest-secret/smrtphone-session", json=good_state)
+                body = resp.json()
+                r.check("login upload saves and reports the check",
+                        resp.status_code == 200 and body.get("cookies") == 1 and body.get("session_ok") is True,
+                        str(body))
+                r.check("login upload never echoes a cookie", "laravel_session" not in resp.text,
+                        resp.text[:200])
+
+                def _no_login(since, until):
+                    raise call_log.SessionError("no smrtPhone session")
+
+                call_log.calls_between = _no_login
+                resp = client.get("/hooks/selftest-secret/calls",
+                                  params={"since": "2026-10-20T06:00:00Z", "until": "2026-10-21T00:00:00Z"})
+                r.check("call log answers 503 smrtphone_session when the login is gone",
+                        resp.status_code == 503 and resp.json().get("error") == "smrtphone_session",
+                        f"{resp.status_code} {resp.text[:120]}")
+                call_log.calls_between = lambda since, until: [{"call_id": "x"}]
+                resp = client.get("/hooks/selftest-secret/calls",
+                                  params={"since": "2026-10-20T06:00:00Z", "until": "2026-10-21T00:00:00Z"})
+                r.check("call log serves smrtPhone calls", resp.status_code == 200
+                        and resp.json().get("calls") == [{"call_id": "x"}], resp.text[:120])
+                resp = client.get("/hooks/wrong-secret/calls", params={"since": "a", "until": "b"})
+                r.check("call log rejects a wrong secret", resp.status_code == 404, f"got {resp.status_code}")
+                resp = client.post("/hooks/selftest-secret/kixie", json={"data": {}})
+                r.check("no Kixie webhook is left on the receiver", resp.status_code in (404, 405),
+                        f"got {resp.status_code}")
+            call_log.calls_between = saved_between
         except ImportError as exc:
-            r.check("fastapi TestClient available (kixie)", False, str(exc))
+            r.check("fastapi TestClient available (smrtphone calls)", False, str(exc))
     finally:
-        for k, v in saved.items():
-            setattr(config, k, v)
+        config.SMRTPHONE_STATE_FILE = saved_state
+        config.CALL_LOG_POLL = saved_poll
+        call_log.check_session = saved_check
 
     print()
     return r.report()

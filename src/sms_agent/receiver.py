@@ -9,9 +9,9 @@ silently lose events. Everything downstream runs in the worker.
 
 Endpoints (the secret is in the path because neither vendor signs its payload):
     POST /hooks/{secret}/smrtphone
-    POST /hooks/{secret}/kixie
     POST /hooks/{secret}/datasift
-    GET  /hooks/{secret}/calls?since=&until=   (Kixie call log, for coaching)
+    GET  /hooks/{secret}/calls?since=&until=   (smrtPhone call log, for coaching)
+    POST /hooks/{secret}/smrtphone-session     (upload a saved smrtPhone login)
     POST /hooks/{secret}/canary?to=<team phone>  (one go-live test text)
     GET  /health
 """
@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from . import config, store
 
@@ -135,28 +136,6 @@ async def smrtphone_hook(
     return _ingest("smrtphone", payload, background)
 
 
-@app.post("/hooks/{secret}/kixie")
-async def kixie_hook(secret: str, request: Request, background: BackgroundTasks) -> Any:
-    """Kixie SMS / call webhooks (Manage > Automations > Webhooks).
-
-    Translated into the smrtPhone-shaped event on the way in, so everything
-    downstream is vendor-blind. See kixie.normalize_webhook.
-    """
-    if not _authorized(secret, request):
-        return Response(status_code=status.HTTP_404_NOT_FOUND)
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        raw = (await request.body()).decode("utf-8", "replace")
-        store.record_event("kixie", "unparseable", f"raw:{hash(raw)}", {"raw": raw[:4000]})
-        return {"ok": True, "note": "unparseable body logged"}
-    if not isinstance(payload, dict):
-        return {"ok": True, "note": "non-object payload ignored"}
-    from . import kixie
-
-    return _ingest("kixie", kixie.normalize_webhook(payload), background)
-
-
 @app.post("/hooks/{secret}/datasift")
 async def datasift_hook(secret: str, request: Request, background: BackgroundTasks) -> Any:
     if not _authorized(secret, request):
@@ -173,17 +152,63 @@ async def datasift_hook(secret: str, request: Request, background: BackgroundTas
 
 
 @app.get("/hooks/{secret}/calls")
-def kixie_calls(secret: str, request: Request, since: str, until: str) -> Any:
-    """Kixie call log for the coaching job (src/call_coaching/kixie_daily_audit.py).
+def smrtphone_calls(secret: str, request: Request, since: str, until: str) -> Any:
+    """smrtPhone call log for the coaching job (src/call_coaching/chs_daily_audit.py).
 
     Read-only, behind the same secret path as the webhooks, because it carries
     seller phone numbers and recording links. since/until are UTC ISO stamps.
+    Answers 503 with the reason when the saved smrtPhone login is missing or
+    expired, so the coaching job can say so in Slack instead of guessing.
     """
     if not _authorized(secret, request):
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     from . import call_log
 
-    return {"ok": True, "calls": call_log.calls_between(since, until)}
+    try:
+        return {"ok": True, "calls": call_log.calls_between(since, until)}
+    except call_log.SessionError as exc:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={
+            "ok": False, "error": "smrtphone_session",
+            "detail": f"smrtPhone login is missing or expired ({str(exc)[:160]}). Capture a new "
+                      "one with src/call_coaching/smrtphone_login.py and run the 'Upload "
+                      "smrtPhone session' workflow."})
+    except ValueError as exc:
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"ok": False, "error": f"bad since/until: {exc}"})
+    except Exception as exc:  # noqa: BLE001 - network or smrtPhone outage
+        log.exception("call log read failed")
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            content={"ok": False, "error": "call_log", "detail": str(exc)[:200]})
+
+
+@app.post("/hooks/{secret}/smrtphone-session")
+async def smrtphone_session(secret: str, request: Request) -> Any:
+    """Save a smrtPhone browser login to SMRTPHONE_STATE_FILE on the volume.
+
+    smrtPhone's call log and SMS log are only readable through the web app's
+    session, and flyctl cannot reach this app from the office machine, so the
+    login arrives here instead. The body is the JSON that
+    src/call_coaching/smrtphone_login.py saves. Only smrtPhone cookies are
+    kept. The reply never echoes a cookie; it says how many were saved and
+    whether the call log reads with them.
+    """
+    if not _authorized(secret, request):
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    try:
+        state = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"ok": False, "error": "body is not JSON"})
+    from . import call_log
+
+    try:
+        saved = call_log.save_session(state)
+    except ValueError as exc:
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"ok": False, "error": str(exc)})
+    session_ok, detail = call_log.check_session()
+    log.info("smrtPhone session uploaded: %s cookies, session_ok=%s", saved, session_ok)
+    return {"ok": True, "cookies": saved, "session_ok": session_ok, "detail": detail}
 
 
 CANARY_TEXT = ("Test from the CHS texting system. Reply to this text with anything "

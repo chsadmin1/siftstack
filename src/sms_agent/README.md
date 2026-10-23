@@ -230,13 +230,23 @@ puts Autotext leads with no phone tier on a `Trestle - MM-DD-YYYY` list and
 posts an approvable cost preview in the P1 channel, and approving it tags
 each scored phone with its own tier.
 
-### Provider
+### Phone system
 
-`SMS_AGENT_PROVIDER` picks the phone system: `smrtphone` (the default, and
-CHS's choice) or `kixie`. Kixie sends through its `/app/event` API as
-`KIXIE_AGENT_EMAIL` and reports texts and calls through webhooks to
-`/hooks/<secret>/kixie`; it has no do-not-text API, so an opt-out is
-suppressed locally and Slack asks someone to add it in Kixie by hand.
+CHS texts and calls through smrtPhone. Texts go out through smrtPhone's API
+(`SMRTPHONE_API_KEY`), and replies arrive on `/hooks/<secret>/smrtphone`.
+smrtPhone has no webhook for a finished call, so every
+`SMS_AGENT_RECONCILE_INTERVAL` seconds the worker reads smrtPhone's call log
+(`call_takeover.py`, on when `SMS_AGENT_CALL_LOG_POLL=1`) and pauses the
+thread when a rep had a real call with that seller. The daily call coaching
+job reads the same log through `GET /hooks/<secret>/calls`
+(`call_log.py`).
+
+Both logs are only readable through a saved smrtPhone browser login at
+`SMRTPHONE_STATE_FILE`. Capture one with
+`python src/call_coaching/smrtphone_login.py` and put it on the Fly volume with
+the "Upload smrtPhone session" GitHub workflow, which posts it to
+`POST /hooks/<secret>/smrtphone-session`. Repeat when the login expires; the
+coaching Slack post says when it has.
 
 ## Testing without sending anything
 

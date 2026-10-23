@@ -66,32 +66,14 @@ SMRTPHONE_BASE = _env("SMRTPHONE_BASE", "https://phone.smrt.studio")
 SMRTPHONE_STATE_FILE = _env("SMRTPHONE_STATE_FILE", str(ROOT / "smrtphone_state.json"))
 SESSION_HEADLESS = _env("SMS_AGENT_SESSION_HEADLESS", "1") not in ("0", "false", "False")
 # Admin > Phone Numbers. JSON array of E.164 strings, or a path to a JSON file.
-# SMS_AGENT_NUMBERS is the provider-neutral spelling (the Kixie deployment
-# uses it); SMRTPHONE_NUMBERS still works and wins nothing over it.
+# SMS_AGENT_NUMBERS is the newer spelling (the CHS deployment uses it);
+# SMRTPHONE_NUMBERS still works and wins nothing over it.
 SMRTPHONE_NUMBERS_RAW = _env("SMS_AGENT_NUMBERS") or _env("SMRTPHONE_NUMBERS", "")
 NUMBERS_FILE = Path(
     _env("SMRTPHONE_NUMBERS_FILE")
     or _env("SMS_AGENT_NUMBERS_FILE")
     or str(ROOT / "config" / "sms_numbers.json")
 )
-
-# ---------------------------------------------------------------- provider
-# Which phone system carries the texts. 525 Homes runs smrtPhone; the Creative
-# Home Solutions deployment (2026-10) runs Kixie. See kixie.py for what the
-# Kixie API does and does not offer.
-PROVIDER = _env("SMS_AGENT_PROVIDER", "smrtphone").lower()  # smrtphone | kixie
-# Manage > Account Settings > Edit All > Integrations. API access has to be
-# switched on by Kixie support, on the Professional tier or above.
-KIXIE_API_KEY = _env("KIXIE_API_KEY", "")
-KIXIE_BUSINESS_ID = _env("KIXIE_BUSINESS_ID", "")
-# The Kixie USER the agent texts as (eventname "sms"). Kixie sends from that
-# user's Outbound SMS Number, so a callback rings the same person the text is
-# signed by. A real address, so it arrives as a Fly secret (this repo is public).
-KIXIE_AGENT_EMAIL = _env("KIXIE_AGENT_EMAIL", "")
-# Optional Team SMS id (Manage > Numbers > Team SMS). When set, sends use
-# eventname "bizsms" with a per-message fromNumber, which is what a pool of
-# several numbers needs. Without it every text leaves from the agent's number.
-KIXIE_TEAM_SMS_ID = _env("KIXIE_TEAM_SMS_ID", "")
 
 # ---------------------------------------------------------------- reisift
 DEALROOM_API = Path(
@@ -147,11 +129,11 @@ AUTHORSHIP_WINDOW_MINUTES = int(_env("SMS_AGENT_AUTHORSHIP_WINDOW", "10"))
 # A call shorter than this is a voicemail or a wrong number, not a human taking
 # over the conversation. Same threshold the call coaching pipeline already uses.
 CALL_TAKEOVER_MIN_SECONDS = int(_env("SMS_AGENT_CALL_TAKEOVER_SECONDS", "60"))
-# Poll smrtPhone's CALL log for takeovers (call_takeover.py). Off when the team
-# dials from another system: CHS texts through smrtPhone but calls through
-# Kixie, so its calls never appear in smrtPhone's log and takeover comes from
-# Kixie's endcall webhook instead (engine.handle_call_ended), which works
-# whatever SMS_AGENT_PROVIDER is.
+# Poll smrtPhone's CALL log for takeovers (call_takeover.py). smrtPhone has no
+# webhook for a finished call, so this sweep is the only way the agent learns a
+# rep phoned someone it is texting. It reads the log through the browser
+# session in SMRTPHONE_STATE_FILE, like the reconcile backstop. Turn it off
+# only if the team dials from a system other than smrtPhone.
 CALL_LOG_POLL = _env("SMS_AGENT_CALL_LOG_POLL", "1") not in ("0", "false", "no")
 # Team phones the /canary endpoint may text, comma separated. The canary is
 # the one send that ignores SMS_AGENT_DRY_RUN, so it is limited to numbers the
@@ -470,18 +452,9 @@ def missing() -> list[str]:
     gaps = []
     if not WEBHOOK_SECRET:
         gaps.append("SMS_AGENT_WEBHOOK_SECRET (receiver would accept anonymous posts)")
-    if PROVIDER == "kixie":
-        if not KIXIE_API_KEY or not KIXIE_BUSINESS_ID:
-            gaps.append("KIXIE_API_KEY / KIXIE_BUSINESS_ID (cannot send replies)")
-        if not KIXIE_AGENT_EMAIL and not KIXIE_TEAM_SMS_ID:
-            gaps.append("KIXIE_AGENT_EMAIL or KIXIE_TEAM_SMS_ID (Kixie has no sender to text as)")
-        if not ANTHROPIC_API_KEY:
-            gaps.append("ANTHROPIC_API_KEY (replies fall back to keyword matching)")
-    elif not SMRTPHONE_API_KEY:
+    if not SMRTPHONE_API_KEY:
         gaps.append("SMRTPHONE_API_KEY (cannot send replies)")
     if not numbers():
-        # Even on Kixie's single-sender mode the pool must name the agent's
-        # number: it carries the per-number cap, pacing and sticky sender.
         gaps.append("SMS_AGENT_NUMBERS / config/sms_numbers.json (no sending pool)")
     if PHASE >= 3 and not ANTHROPIC_API_KEY:
         gaps.append("ANTHROPIC_API_KEY (cannot generate replies)")
@@ -491,14 +464,13 @@ def missing() -> list[str]:
     if VM_FOLLOWUP_ENABLED and not CALL_LOG_POLL:
         gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone call dispositions, and "
                     "SMS_AGENT_CALL_LOG_POLL says calls happen in another dialer")
-    elif VM_FOLLOWUP_ENABLED and PROVIDER == "kixie":
-        gaps.append("SMS_AGENT_VM_FOLLOWUP is on but reads smrtPhone's call log; it does nothing on Kixie")
-    elif VM_FOLLOWUP_ENABLED and not Path(SMRTPHONE_STATE_FILE).exists():
+    if (CALL_LOG_POLL or VM_FOLLOWUP_ENABLED) and not Path(SMRTPHONE_STATE_FILE).exists():
         gaps.append(
-            f"SMRTPHONE_STATE_FILE ({SMRTPHONE_STATE_FILE}) does not exist; voicemail "
-            "follow-up (and the SMS-log reconcile backstop) both read the call/SMS "
-            "log via this browser session, not the API key - re-run "
-            "_api/smrtphone_login.py and upload the file"
+            f"SMRTPHONE_STATE_FILE ({SMRTPHONE_STATE_FILE}) does not exist; call takeover, "
+            "the coaching call log, voicemail follow-up and the SMS-log reconcile backstop "
+            "all read smrtPhone's logs through this browser session, not the API key. "
+            "Capture one with src/call_coaching/smrtphone_login.py and upload it "
+            "(POST /hooks/<secret>/smrtphone-session)"
         )
     return gaps
 

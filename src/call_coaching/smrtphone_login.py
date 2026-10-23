@@ -14,6 +14,7 @@ USAGE (from SiftStack root, venv python):
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -38,10 +39,23 @@ def main() -> int:
         print("Once you're on the logged-in dashboard (call log / home screen),")
         input("come back here and press Enter to capture the session... ")
 
-        context.storage_state(path=str(STATE_PATH))
+        state = context.storage_state()
         browser.close()
 
-    print(f"Session saved -> {STATE_PATH}")
+    # Keep only smrtPhone's own cookies and localStorage. Everything that reads
+    # this file looks for those alone, and the trimmed file is small enough to
+    # store as a GitHub secret for the CHS SMS agent (see below).
+    state = {
+        "cookies": [c for c in state.get("cookies", []) if "smrt" in c.get("domain", "")],
+        "origins": [o for o in state.get("origins", []) if "smrt" in o.get("origin", "")],
+    }
+    STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    print(f"Session saved -> {STATE_PATH} ({len(state['cookies'])} smrtPhone cookies)")
+    print()
+    print("CHS SMS agent: copy it into the SMRTPHONE_SESSION GitHub secret with")
+    print(f'  [Convert]::ToBase64String([IO.File]::ReadAllBytes("{STATE_PATH}")) | Set-Clipboard')
+    print("then paste into GitHub > Settings > Secrets and variables > Actions >")
+    print("SMRTPHONE_SESSION, and run Actions > 'Upload smrtPhone session'.")
     return 0
 
 

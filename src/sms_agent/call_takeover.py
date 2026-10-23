@@ -100,30 +100,37 @@ def _crm_ids(row: dict) -> tuple[str, str]:
     return (prop.group(1) if prop else "", owner.group(1) if owner else "")
 
 
+def fetch_page(session, page: int = 0, per_page: int = 200) -> list[dict]:
+    """One page of the call log, newest first. Raises RuntimeError when the
+    session is missing or expired (the log then answers with a login page)."""
+    form = {
+        "draw": "1", "start": str(page * per_page), "length": str(per_page),
+        "search[value]": "", "search[regex]": "false",
+        "order[0][column]": "3", "order[0][dir]": "desc",
+    }
+    for i, col in enumerate(COLUMNS):
+        form[f"columns[{i}][data]"] = col
+        form[f"columns[{i}][name]"] = col
+        form[f"columns[{i}][searchable]"] = "true"
+        form[f"columns[{i}][orderable]"] = "true"
+        form[f"columns[{i}][search][value]"] = ""
+        form[f"columns[{i}][search][regex]"] = "false"
+    resp = session.post(BASE + LOG_PATH, data=form, timeout=90)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code} from the call log")
+    try:
+        return resp.json().get("data") or []
+    except ValueError:
+        raise RuntimeError("smrtPhone session expired; capture a new one with "
+                           "src/call_coaching/smrtphone_login.py and upload it") from None
+
+
 def fetch_calls(pages: int = 2, per_page: int = 200) -> list[dict]:
     """Recent calls, newest first."""
     session = _session()
     rows: list[dict] = []
     for page in range(pages):
-        form = {
-            "draw": "1", "start": str(page * per_page), "length": str(per_page),
-            "search[value]": "", "search[regex]": "false",
-            "order[0][column]": "3", "order[0][dir]": "desc",
-        }
-        for i, col in enumerate(COLUMNS):
-            form[f"columns[{i}][data]"] = col
-            form[f"columns[{i}][name]"] = col
-            form[f"columns[{i}][searchable]"] = "true"
-            form[f"columns[{i}][orderable]"] = "true"
-            form[f"columns[{i}][search][value]"] = ""
-            form[f"columns[{i}][search][regex]"] = "false"
-        resp = session.post(BASE + LOG_PATH, data=form, timeout=90)
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code} from the call log")
-        try:
-            page_rows = resp.json().get("data") or []
-        except ValueError:
-            raise RuntimeError("session expired; re-run _api/smrtphone_login.py") from None
+        page_rows = fetch_page(session, page, per_page)
         if not page_rows:
             break
         rows.extend(page_rows)
@@ -133,18 +140,28 @@ def fetch_calls(pages: int = 2, per_page: int = 200) -> list[dict]:
 def _counterparty(row: dict) -> str:
     """The seller's number, whichever end of the call they were on.
 
-    Reading `direction` would work, but picking the side that is not one of our
-    own sending numbers is robust to a relabelled or newly bought DID.
+    When exactly one end is one of our own sending numbers, the other end is
+    the seller; that holds even for a relabelled or newly bought DID. Reps
+    often dial from a smrtPhone line that is not in the texting pool, though,
+    and then neither end is "ours", so the call's direction decides.
+
+    Both sides are compared as 10-digit numbers. The pool is stored as E.164
+    (+1...), and comparing that against cleaned digits never matched, which
+    made every outbound call look like it was to our own number.
     """
-    ours = set(config.numbers())
+    ours = {store.clean_phone(n) for n in config.numbers()}
     a = store.clean_phone(_cell(row, "from_num", "fromNum", "number"))
     b = store.clean_phone(_cell(row, "to_num", "toNum", "number"))
-    if a and a not in ours:
-        return a
-    if b and b not in ours:
+    if a in ours and b and b not in ours:
         return b
-    # Both look like ours (or neither parsed). Fall back to direction.
-    return b if (row.get("direction") or "").lower() == "outbound" else a
+    if b in ours and a and a not in ours:
+        return a
+    direction = (_clean(row.get("direction")) or "").lower()
+    if direction.startswith("out"):
+        return b
+    if direction.startswith("in"):
+        return a
+    return b or a
 
 
 def _seconds(row: dict) -> int:

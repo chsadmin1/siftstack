@@ -28,28 +28,28 @@ python src/p1_manager/monthly.py --dry-run    # preview this month's refresh, no
 
 Deployment is via GitHub Actions (`.github/workflows/deploy-chs-p1-manager.yml`), not local `flyctl` — see that file's header comment for why.
 
-## SMS agent: texts through smrtPhone, calls through Kixie (being set up, 2026-10)
+## SMS agent: texts and calls through smrtPhone (being set up, 2026-10)
 
 `src/sms_agent/` (the two-way texting agent: outreach from the `Autotext` preset, reply classification, opt-outs, hot-lead handoff to Slack) is being brought up for this account as the Fly app `chs-sms-agent` (`fly.chs-sms-agent.toml`, deployed by `.github/workflows/deploy-chs-sms-agent.yml`). It starts in `SMS_AGENT_DRY_RUN=1`, on Mountain time (`America/Boise`), signing texts as Nick. Full agent docs: `src/sms_agent/README.md`.
 
-**Split phone systems (Dan, 2026-10-14): everything about TEXTING goes through smrtPhone; everything about CALLS (call reviews, call takeover) goes through Kixie.**
-- **Texting:** `SMS_AGENT_PROVIDER=smrtphone`, the provider the upstream agent was built on. Sends use smrtPhone's API (`SMRTPHONE_API_KEY`); smrtPhone's SMS webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/smrtphone`. No text sends until smrtPhone's A2P 10DLC registration is approved.
-- **Calling:** Kixie's End Call (and Call Disposition) webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/kixie` (Kixie: Manage > Automations > Webhooks). `kixie.normalize_webhook` turns them into `callEnded` events, and `engine.handle_call_ended` pauses the texting thread when a rep has a real call with that seller, regardless of provider. The same stored events feed call coaching (`src/sms_agent/call_log.py`). Kixie's SMS webhook is not used.
-- `SMS_AGENT_CALL_LOG_POLL=0` turns off the smrtPhone call-log takeover poll (calls are not in smrtPhone), and `SMS_AGENT_VM_FOLLOWUP=0` for the same reason.
-- `SMS_AGENT_RECONCILE_INTERVAL=0` until a captured smrtPhone browser session (`/data/smrtphone_state.json`) is on the volume; that backstop re-reads smrtPhone's SMS log for replies whose webhook was dropped. Set it to `300` once the file is there.
-- The Kixie SMS provider (`kixie.py` send path) stays in the code but is not selected here.
+**One phone system (2026-10-23): CHS texts AND calls through smrtPhone.** Kixie was used for calls from 2026-10-14 and has been removed from the repo (provider, webhook, call log, coaching job, text-touch provider).
+- **Texting:** sends use smrtPhone's API (`SMRTPHONE_API_KEY`); smrtPhone's SMS webhooks go to `POST /hooks/{SMS_AGENT_WEBHOOK_SECRET}/smrtphone`. No text sends until smrtPhone's A2P 10DLC registration is approved.
+- **Calling:** smrtPhone has no webhook for a finished call. Every `SMS_AGENT_RECONCILE_INTERVAL` (300 s) the worker reads smrtPhone's call log (`call_takeover.py`, `SMS_AGENT_CALL_LOG_POLL=1`) and pauses the texting thread when a rep had a real call (60 s+) with that seller. The same log feeds call coaching through `GET /hooks/{secret}/calls` (`src/sms_agent/call_log.py`). The reconcile backstop for dropped reply webhooks runs on the same timer; `RECONCILE_INTERVAL=0` would switch off call takeover too.
+- **The smrtPhone login:** both logs are only readable through a saved smrtPhone browser login at `/data/smrtphone_state.json`, not the API key. Capture it with `python src/call_coaching/smrtphone_login.py` (it prints the PowerShell line that copies it to the clipboard), store it as the `SMRTPHONE_SESSION` repo secret, then run the "Upload smrtPhone session" workflow (`.github/workflows/upload-chs-smrtphone-session.yml`), which posts it to `POST /hooks/{secret}/smrtphone-session` and fails if smrtPhone rejects it. Until it is on the volume, `config.missing()` lists it at startup and the sweeps log a warning. Repeat when it expires; the coaching Slack post says so.
+- `call_takeover._counterparty` compares numbers as 10 digits (the pool is stored as E.164, which never matched before 2026-10-23) and falls back to the call's direction when a rep dials from a line outside the texting pool.
+- `SMS_AGENT_VM_FOLLOWUP=0`: the voicemail follow-up text is available now that calls are in smrtPhone, but stays off until the team asks for it.
 
 Taking a record out of the `Autotext` preset (removing the tag it filters on) is the off switch: the morning run only picks current members, and `worker.drain_outbox` re-checks membership (`campaign.left_cohort`, one cached sweep per 5 min) before each `seed_touch_*` sends, so that day's queued touches are cancelled too. An unreadable preset holds the touch rather than sending it.
 
 DataSift's own smrtPhone integration logs texts and replies to each record's activity; watch for a double count of `sms_attempts` on the first live send.
 
-`python src/sms_agent/cli.py selftest` runs 293 zero-network checks (section 13 covers the Kixie webhooks); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`.
+`python src/sms_agent/cli.py selftest` runs 297 zero-network checks (section 13 covers the smrtPhone call log, the login upload and call takeover); the endpoint checks need `fastapi` from `deploy/requirements-sms-agent.txt`. "a send increments the Sift counter" fails when run before 9 AM Eastern, because the probe send waits for business hours.
 
 ## Call coaching and KPI digest (GitHub Actions, 2026-10)
 
 Two scheduled GitHub Actions jobs post to one CHS Slack channel (`SLACK_SALES_WEBHOOK_URL`). Setup and secrets: `docs/setup/chs-coaching-and-kpi.md`.
 
-- **Daily call coaching** (`.github/workflows/chs-call-coaching.yml`, Tue to Sat 7:30 AM Mountain): `src/call_coaching/kixie_daily_audit.py` reads yesterday's Kixie calls from `chs-sms-agent` (`GET /hooks/{secret}/calls`, built from stored `endcall` webhooks by `src/sms_agent/call_log.py`), samples 3 per rep, transcribes (`transcribe.py`, OpenRouter), grades with Claude against `skills/*-coach/references/rubric.md` (`grade.py`), appends to the call audit sheet (`append_audit_row.py`; the sheet's Call ID column is the de-dup ledger) and posts a Slack summary. The SmrtPhone path (`pull_calls.py`, `daily_audit.py`) is upstream's and unused here.
+- **Daily call coaching** (`.github/workflows/chs-call-coaching.yml`, Tue to Sat 7:30 AM Mountain): `src/call_coaching/chs_daily_audit.py` reads yesterday's smrtPhone calls from `chs-sms-agent` (`GET /hooks/{secret}/calls`, read live from smrtPhone's call log by `src/sms_agent/call_log.py`, with direct rec.smrtphone.io recording URLs), samples 3 per rep, transcribes (`transcribe.py`, OpenRouter), grades with Claude against `skills/*-coach/references/rubric.md` (`grade.py`), appends to the call audit sheet (`append_audit_row.py`; the sheet's Call ID column is the de-dup ledger) and posts a Slack summary. If the agent's smrtPhone login has expired, the Slack post says so instead. Upstream's local smrtPhone path (`pull_calls.py`, `daily_audit.py`) needs a person to run it and is unused here; `chs_daily_audit.py` reuses its recording download.
 - **Daily KPI digest** (`.github/workflows/chs-kpi-digest.yml`, weekdays 5 PM Mountain): `src/kpi_bot/kpi_slack_bot.py` reads the KPI Google Sheet reps fill in by hand (template `docs/kpi/CHS-KPI-Tracking.xlsx`) and posts per-rep numbers plus the funnel summary.
 
 GitHub cron has no daylight saving: each workflow has an MDT and an MST trigger and a gate step that runs only the one matching Boise time. Tests: `python tests/test_chs_coaching_kpi.py`.
