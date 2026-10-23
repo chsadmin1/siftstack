@@ -34,6 +34,15 @@ primary_region = 'iad'
   # Phone enrichment cost preview, Mon to Fri. Posts to the P1 channel;
   # Trestle runs only when someone replies "approve" (src/p1_manager/enrich.py).
   P1_ENRICH_AT = '07:00,12:00'
+  # Keeps the texting robot (chs-sms-agent) logged in to smrtPhone
+  # (src/p1_manager/smrtphone_keeper.py). Hourly from 6 AM to 8 PM it asks the
+  # agent whether its smrtPhone login still works and renews it when not,
+  # asking in this app's Slack channel only if smrtPhone wants a code and no
+  # authenticator key is saved. The login itself is three GitHub secrets:
+  # SMRTPHONE_LOGIN_EMAIL, SMRTPHONE_LOGIN_PASSWORD, SMRTPHONE_TOTP_SECRET.
+  SMS_AGENT_URL = 'https://chs-sms-agent.fly.dev'
+  SMRTPHONE_CHECK_MINUTES = '60'
+  SMRTPHONE_CHECK_HOURS = '6-20'
 
 [[mounts]]
   source = 'p1_manager_data'

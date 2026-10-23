@@ -31,6 +31,8 @@ THE NEW-RECORDS FLOW (daily, 6 AM Eastern since 2026-10-21):
   4. No reply, no action beyond the automatic Raw placement.
 Phone-scoring previews (enrich.py, trestle_queue.py) are pending asks of
 kind "enrich" and are answered with approve / skip in their own threads.
+smrtPhone login-code requests (smrtphone_keeper.py) are pending asks of kind
+"smrtphone_code", answered with the code (or "new code") in their threads.
 """
 from __future__ import annotations
 
@@ -285,6 +287,14 @@ def handle_reply(thread_ts: str, text: str, channel: str) -> None:
     if not pending:
         return  # a reply to something we're not tracking
 
+    if pending.get("kind") == "smrtphone_code":  # the texting robot's login (smrtphone_keeper.py)
+        import smrtphone_keeper
+        smrtphone_keeper.handle_code_reply(
+            thread_ts, text, pending,
+            lambda msg: _call("chat.postMessage", {"channel": channel, "thread_ts": thread_ts, "text": msg}),
+            post_to_channel)
+        return
+
     if pending.get("kind") == "enrich":  # a phone-enrichment cost preview (enrich.py)
         import enrich
         enrich.handle_reply(thread_ts, text, pending, lambda msg: _call("chat.postMessage", {
@@ -363,6 +373,10 @@ def _startup() -> None:
             import trestle_queue
             trestle_queue.start_watcher(post_to_channel)
             log.info("Trestle watcher started")
+        import smrtphone_keeper
+        if smrtphone_keeper.agent_ready() and schedule._slack_ready():
+            smrtphone_keeper.start_watcher(post_to_channel)
+            log.info("smrtPhone login keeper started")
     _start_socket_mode()
 
 
@@ -482,7 +496,7 @@ async def slack_events(request: Request, x_slack_signature: str = Header(None),
 
 @app.post("/trigger/{job}")
 async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
-                  only: str = "", commit: bool = True):
+                  only: str = "", commit: bool = True, force: bool = False):
     """Manually fire a job INSIDE the deployed container, so its state (the
     weekly cursor, pending Slack asks) lands on the real /data volume instead
     of a local machine's throwaway state -- the gap that made an early manual
@@ -497,6 +511,9 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
     POST /trigger/enrich?secret=...                       # run the enrichment preview now
     POST /trigger/enrich?secret=...&only=List A|List B    # preview specific lists, even
                                                           # ones already handled
+    POST /trigger/smrtphone?secret=...                    # check the texting robot's
+                                                          # smrtPhone login now, renew if needed
+    POST /trigger/smrtphone?secret=...&force=true         # log in again even if it works
 
     `only` is PIPE-separated, not comma-separated -- every real preset name
     in this account contains a comma ("... County, MO"), so splitting on
@@ -506,9 +523,17 @@ async def trigger(job: str, secret: str, background_tasks: BackgroundTasks,
     expected = os.environ.get("P1_TRIGGER_SECRET", "")
     if not expected or secret != expected:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    if job not in ("weekly", "monthly", "enrich", "trestle"):
-        return JSONResponse({"error": "job must be 'weekly', 'monthly', 'enrich' or 'trestle'"},
+    if job not in ("weekly", "monthly", "enrich", "trestle", "smrtphone"):
+        return JSONResponse({"error": "job must be 'weekly', 'monthly', 'enrich', 'trestle' or 'smrtphone'"},
                             status_code=400)
+    if job == "smrtphone":
+        # Runs in the request (a login takes seconds) so the caller sees the
+        # outcome. The result names steps and form fields, never a value.
+        import asyncio
+
+        import smrtphone_keeper
+        outcome = await asyncio.to_thread(smrtphone_keeper.run_check, post_to_channel, force)
+        return JSONResponse({"ok": True, "job": job, "force": force, **outcome})
 
     import schedule
 

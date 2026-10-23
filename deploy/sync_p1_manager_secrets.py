@@ -32,6 +32,10 @@ OPTIONAL = [
     ("SLACK_SIGNING_SECRET", "verifies inbound Slack events are real"),
     ("SLACK_CHANNEL_ID", "where the weekly ask / monthly report post"),
     ("P1_TRIGGER_SECRET", "gates POST /trigger/{job} for manual in-container test runs"),
+    ("SMS_AGENT_WEBHOOK_SECRET", "lets the smrtPhone login keeper check and renew the SMS agent's login"),
+    ("SMRTPHONE_LOGIN_EMAIL", "the smrtPhone user the keeper logs in as"),
+    ("SMRTPHONE_LOGIN_PASSWORD", "that user's smrtPhone password"),
+    ("SMRTPHONE_TOTP_SECRET", "that user's authenticator key, so no code has to be typed"),
 ]
 
 

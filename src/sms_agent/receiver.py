@@ -12,6 +12,7 @@ Endpoints (the secret is in the path because neither vendor signs its payload):
     POST /hooks/{secret}/datasift
     GET  /hooks/{secret}/calls?since=&until=   (smrtPhone call log, for coaching)
     POST /hooks/{secret}/smrtphone-session     (upload a saved smrtPhone login)
+    GET  /hooks/{secret}/smrtphone-session     (does the saved login still work?)
     POST /hooks/{secret}/canary?to=<team phone>  (one go-live test text)
     GET  /health
 """
@@ -169,9 +170,9 @@ def smrtphone_calls(secret: str, request: Request, since: str, until: str) -> An
     except call_log.SessionError as exc:
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={
             "ok": False, "error": "smrtphone_session",
-            "detail": f"smrtPhone login is missing or expired ({str(exc)[:160]}). Capture a new "
-                      "one with src/call_coaching/smrtphone_login.py and run the 'Upload "
-                      "smrtPhone session' workflow."})
+            "detail": f"smrtPhone login is missing or expired ({str(exc)[:160]}). The P1 Manager "
+                      "renews it within the hour; check the P1 channel for a message about it, "
+                      "or run the 'Check smrtPhone login' workflow."})
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
                             content={"ok": False, "error": f"bad since/until: {exc}"})
@@ -179,6 +180,20 @@ def smrtphone_calls(secret: str, request: Request, since: str, until: str) -> An
         log.exception("call log read failed")
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             content={"ok": False, "error": "call_log", "detail": str(exc)[:200]})
+
+
+@app.get("/hooks/{secret}/smrtphone-session")
+def smrtphone_session_status(secret: str, request: Request) -> Any:
+    """Whether the saved smrtPhone login still reads the call log.
+
+    Asked hourly by the P1 Manager's login keeper (src/p1_manager/
+    smrtphone_keeper.py), which renews the login when this says no.
+    """
+    if not _authorized(secret, request):
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    from . import call_log
+
+    return {"ok": True, **call_log.session_status()}
 
 
 @app.post("/hooks/{secret}/smrtphone-session")
