@@ -1,0 +1,72 @@
+name: Upload smrtPhone session
+
+# Puts a saved smrtPhone login on the chs-sms-agent volume.
+#
+# smrtPhone has no API for its call log or its SMS log, and no webhook for a
+# finished call. The agent reads both logs through a browser login instead,
+# for three jobs: pausing the texting thread when a rep calls a seller (call
+# takeover), the daily call coaching job's call list, and the backstop that
+# recovers replies whose webhook was dropped.
+#
+# 1. On the office machine: python src/call_coaching/smrtphone_login.py
+#    (a browser opens, log in by hand, press Enter). It prints a PowerShell
+#    line that copies the login, base64-encoded, to the clipboard.
+# 2. Paste it into the repo secret SMRTPHONE_SESSION
+#    (Settings > Secrets and variables > Actions).
+# 3. Run this workflow. It fails loudly if smrtPhone rejects the login.
+#
+# Repeat all three whenever the call coaching Slack post says the login has
+# expired. This goes through GitHub because flyctl cannot reach Fly's API from
+# the office machine. The agent keeps only smrtPhone cookies and its reply
+# never echoes one.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: chs-smrtphone-session
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send the login to chs-sms-agent
+        env:
+          SESSION_B64: ${{ secrets.SMRTPHONE_SESSION }}
+          WEBHOOK_SECRET: ${{ secrets.SMS_AGENT_WEBHOOK_SECRET || secrets.CHS_SMS_WEBHOOK_SECRET }}
+          AGENT_URL: https://chs-sms-agent.fly.dev
+        run: |
+          set -euo pipefail
+          if [ -z "$SESSION_B64" ]; then
+            echo "::error::SMRTPHONE_SESSION is not set. See the steps at the top of this workflow."
+            exit 1
+          fi
+          if [ -z "$WEBHOOK_SECRET" ]; then
+            echo "::error::SMS_AGENT_WEBHOOK_SECRET (or CHS_SMS_WEBHOOK_SECRET) is not set."
+            exit 1
+          fi
+          body="$RUNNER_TEMP/session.json"
+          resp="$RUNNER_TEMP/resp.json"
+          printf '%s' "$SESSION_B64" | base64 -d > "$body"
+          code=000
+          for attempt in 1 2 3; do  # Fly's edge often drops the first request after idle
+            code=$(curl -sS -o "$resp" -w '%{http_code}' -X POST \
+              -H 'Content-Type: application/json' --data-binary @"$body" \
+              "$AGENT_URL/hooks/$WEBHOOK_SECRET/smrtphone-session") || code=000
+            if [ "$code" != "000" ]; then break; fi
+            sleep 5
+          done
+          rm -f "$body"
+          echo "HTTP $code"
+          if [ -f "$resp" ]; then cat "$resp"; echo; fi
+          if [ "$code" != "200" ]; then
+            echo "::error::The agent did not accept the login (HTTP $code)."
+            exit 1
+          fi
+          if ! python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('session_ok') else 1)" "$resp"; then
+            echo "::error::Saved on the agent, but smrtPhone rejected it. Capture a fresh login and run this again."
+            exit 1
+          fi
+          echo "smrtPhone login saved and the call log reads with it."

@@ -421,11 +421,10 @@ def run_once(with_reconcile: bool = True) -> dict:
 
     # Backstop poll. smrtPhone gives no delivery guarantee, so a dropped
     # webhook is a lost reply with nothing to notice it. This catches those.
-    # Both backstops below read smrtPhone's own logs. Kixie has no message
-    # history API, and its call takeover arrives as an `endcall` webhook
-    # instead (engine.handle_call_ended), so neither poll applies there.
+    # Both backstops below read smrtPhone's own logs through the browser
+    # session (SMRTPHONE_STATE_FILE), not the API key.
     global _last_reconcile
-    if with_reconcile and config.RECONCILE_INTERVAL and config.PROVIDER != "kixie":
+    if with_reconcile and config.RECONCILE_INTERVAL:
         if time.time() - _last_reconcile >= config.RECONCILE_INTERVAL:
             _last_reconcile = time.time()
             try:
@@ -447,7 +446,7 @@ def run_once(with_reconcile: bool = True) -> dict:
             # emits no SMS event at all. Same cadence, same session, same
             # failure mode if it is missing: an automated text landing hours
             # after a rep already had the conversation.
-            # Skipped when calls go through another dialer (config.CALL_LOG_POLL).
+            # Skipped only if the team dials outside smrtPhone (config.CALL_LOG_POLL).
             if config.CALL_LOG_POLL:
                 try:
                     from . import call_takeover

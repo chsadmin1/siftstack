@@ -1,10 +1,11 @@
-name: Daily call coaching (Kixie)
+name: Daily call coaching (smrtPhone)
 
-# Grades a sample of yesterday's Kixie calls per rep against the cold call /
-# lead manager / closer rubrics, appends one row per call to the CHS call
-# audit Google Sheet, and posts a summary to the CHS sales Slack channel.
-# Source: src/call_coaching/kixie_daily_audit.py. The call log comes from the
-# chs-sms-agent app, which stores every Kixie end-call webhook.
+# Grades a sample of yesterday's smrtPhone calls per rep against the cold
+# call / lead manager / closer rubrics, appends one row per call to the CHS
+# call audit Google Sheet, and posts a summary to the CHS sales Slack channel.
+# Source: src/call_coaching/chs_daily_audit.py. The call log comes from the
+# chs-sms-agent app, which reads smrtPhone's call log through the login on its
+# volume (see upload-chs-smrtphone-session.yml).
 #
 # Runs Tuesday to Saturday at 7:30 AM Mountain (reviewing Monday to Friday).
 # GitHub cron is UTC with no daylight saving, so there are two triggers and
@@ -84,4 +85,4 @@ jobs:
           ARGS=(--per-rep "${{ inputs.per_rep || '3' }}")
           if [ -n "${{ inputs.date }}" ]; then ARGS+=(--date "${{ inputs.date }}"); fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
-          python src/call_coaching/kixie_daily_audit.py "${ARGS[@]}"
+          python src/call_coaching/chs_daily_audit.py "${ARGS[@]}"

@@ -11,7 +11,7 @@ setup-kpi-bot so it can run unattended from GitHub Actions:
   * dates are computed in KPI_TZ (default America/Boise), not the runner's UTC
   * header cells are read whitespace-stripped and blank columns are ignored,
     so a stray trailing space in a header no longer zeroes a whole section
-  * the dialer tab is "Dialer" (Kixie), falling back to "SmrtDialer"
+  * the dialer tab is "Dialer" (smrtPhone dialer numbers), falling back to "SmrtDialer"
   * a TODAY BY REP section shows each salesperson's logged numbers and who
     has not logged yet (KPI_REPS)
 
@@ -551,7 +551,7 @@ def leads_summary_kpis(sheet):
 
 
 def smrtdialer_kpis(sheet):
-    """Dialer tab (Kixie; "SmrtDialer" on older copies) — dials, new leads,
+    """Dialer tab (smrtPhone dialer numbers; "SmrtDialer" on older copies) — dials, new leads,
     talk time today/this week."""
     ws = _worksheet(sheet, "Dialer", "SmrtDialer")
     if ws is None:

@@ -19,14 +19,14 @@ import { TextTouchAuditInsert, TextTouchAuditRecord } from '../db/schema';
  * SMS Provider Configuration
  *
  * Expects environment variables:
- * - SMS_PROVIDER: 'kixie' | 'twilio' | 'aws-sns' | 'mock'
- * - For Kixie:
- *   - KIXIE_API_KEY: API key from Kixie Dashboard
- *   - KIXIE_BUSINESS_ID: Business ID from Kixie Dashboard
+ * - SMS_PROVIDER: 'smrtphone' | 'twilio' | 'aws-sns' | 'mock'
+ * - For smrtPhone:
+ *   - SMRTPHONE_API_KEY: Admin > API Tokens in the smrtPhone web app
+ *   - SMRTPHONE_BASE: optional, defaults to https://phone.smrt.studio
  * - For Twilio:
  *   - SMS_ACCOUNT_ID: Twilio Account SID
  *   - SMS_AUTH_TOKEN: Twilio Auth Token
- * - SMS_FROM_NUMBER: Sender phone number (optional, not used by Kixie)
+ * - SMS_FROM_NUMBER: Sender phone number (required for smrtPhone and Twilio)
  */
 interface SMSProvider {
   name: string;
@@ -58,24 +58,27 @@ class MockSMSProvider implements SMSProvider {
 }
 
 /**
- * Kixie SMS Provider
+ * smrtPhone SMS Provider
  *
- * Sends SMS via Kixie's REST API
- * Requires: KIXIE_API_KEY, KIXIE_BUSINESS_ID
- * API Docs: https://www.kixie.com/developer/automation-send-sms/
+ * Sends SMS through smrtPhone's API, the same call the Python SMS agent makes
+ * (src/sms_agent/smrtphone.py): POST {SMRTPHONE_BASE}/sms/send with form
+ * fields from / to / message and the X-Auth-smrtPhone header.
+ * Requires: SMRTPHONE_API_KEY, SMS_FROM_NUMBER (a smrtPhone number on the account)
+ * Texts only deliver once smrtPhone's A2P 10DLC registration is approved.
  */
-class KixieSMSProvider implements SMSProvider {
-  name = 'kixie';
+class SmrtPhoneSMSProvider implements SMSProvider {
+  name = 'smrtphone';
   private apiKey: string;
-  private businessId: string;
-  private endpoint = 'https://apig.kixie.com/app/event';
+  private fromNumber: string;
+  private endpoint: string;
 
-  constructor(apiKey: string, businessId: string) {
-    if (!apiKey || !businessId) {
-      throw new Error('Kixie provider requires KIXIE_API_KEY and KIXIE_BUSINESS_ID');
+  constructor(apiKey: string, fromNumber: string, baseUrl: string) {
+    if (!apiKey || !fromNumber) {
+      throw new Error('smrtPhone provider requires SMRTPHONE_API_KEY and SMS_FROM_NUMBER');
     }
     this.apiKey = apiKey;
-    this.businessId = businessId;
+    this.fromNumber = fromNumber.startsWith('+') ? fromNumber : `+${fromNumber}`;
+    this.endpoint = `${baseUrl.replace(/\/+$/, '')}/sms/send`;
   }
 
   async send(phoneNumber: string, message: string): Promise<{ success: boolean; messageId?: string; error?: string }> {
@@ -102,50 +105,40 @@ class KixieSMSProvider implements SMSProvider {
         };
       }
 
-      // Prepare Kixie API request
-      const payload = {
-        businessid: this.businessId,
-        apikey: this.apiKey,
-        target: normalizedPhone,
-        eventname: 'sms',
-        message: message,
-        email: process.env.KIXIE_EMAIL || 'noreply@creativehomesolutions.org',
-      };
-
-      // Make API call to Kixie
       const response = await fetch(this.endpoint, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'X-Auth-smrtPhone': this.apiKey,
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: JSON.stringify(payload),
+        body: new URLSearchParams({ from: this.fromNumber, to: normalizedPhone, message }).toString(),
       });
 
       if (!response.ok) {
+        const detail = (await response.text()).slice(0, 200);
         return {
           success: false,
-          error: `Kixie API error: ${response.status} ${response.statusText}`,
+          error: `smrtPhone API error: ${response.status} ${response.statusText} ${detail}`.trim(),
         };
       }
 
-      const result = await response.json();
-
-      // Kixie returns { success: boolean, result: { ... } }
-      if (result.success) {
-        return {
-          success: true,
-          messageId: `kixie-${Date.now()}-${normalizedPhone}`,
-        };
-      } else {
-        return {
-          success: false,
-          error: `Kixie API returned success=false: ${JSON.stringify(result)}`,
-        };
+      // smrtPhone answers 2xx with the message id under smsId, id or sid.
+      let messageId = '';
+      try {
+        const result = await response.json();
+        messageId = String(result?.smsId || result?.id || result?.sid || '');
+      } catch {
+        // A 2xx with no JSON body is still an accepted send.
       }
+      return {
+        success: true,
+        messageId: messageId || `smrtphone-${Date.now()}-${normalizedPhone}`,
+      };
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown Kixie provider error',
+        error: error instanceof Error ? error.message : 'Unknown smrtPhone provider error',
       };
     }
   }
@@ -200,10 +193,11 @@ function getSMSProvider(): SMSProvider {
   const provider = process.env.SMS_PROVIDER || 'mock';
 
   switch (provider) {
-    case 'kixie':
-      return new KixieSMSProvider(
-        process.env.KIXIE_API_KEY || '',
-        process.env.KIXIE_BUSINESS_ID || ''
+    case 'smrtphone':
+      return new SmrtPhoneSMSProvider(
+        process.env.SMRTPHONE_API_KEY || '',
+        process.env.SMS_FROM_NUMBER || '',
+        process.env.SMRTPHONE_BASE || 'https://phone.smrt.studio'
       );
     case 'twilio':
       return new TwilioSMSProvider(

@@ -4,15 +4,15 @@ Two scheduled jobs post to one CHS Slack channel (for example `#sales-performanc
 
 | Job | When | What it posts | Code |
 |---|---|---|---|
-| Daily call coaching | Tue to Sat, 7:30 AM Mountain | Yesterday's graded calls per rep, with score, grade, the one fix to make next, and a link to listen | `src/call_coaching/kixie_daily_audit.py`, `.github/workflows/chs-call-coaching.yml` |
+| Daily call coaching | Tue to Sat, 7:30 AM Mountain | Yesterday's graded calls per rep, with score, grade, the one fix to make next, and a link to listen | `src/call_coaching/chs_daily_audit.py`, `.github/workflows/chs-call-coaching.yml` |
 | Daily KPI digest | Mon to Fri, 5:00 PM Mountain | Each rep's logged numbers for the day, who has not logged, and the funnel, cost and expense summary | `src/kpi_bot/kpi_slack_bot.py`, `.github/workflows/chs-kpi-digest.yml` |
 
-Both run on GitHub Actions in this repo. Nothing new is deployed to Fly except one small change to `chs-sms-agent` (a read-only call log endpoint).
+Both run on GitHub Actions in this repo. CHS calls and texts through smrtPhone. The coaching job reads the call list from `chs-sms-agent`, which reads smrtPhone's call log for it.
 
 ## How call coaching works
 
-1. Kixie sends an End Call webhook to `chs-sms-agent` after every call. The webhook carries the recording URL, the call length and the numbers. The agent already stores it.
-2. Each morning the job reads yesterday's calls from the agent (`GET /hooks/<secret>/calls`). It keeps calls that have a recording and last at least 60 seconds (or 15 seconds with a contact disposition), and skips any call already on the sheet.
+1. smrtPhone has no webhook for a finished call and no public call-history API. Its web app's call log has everything coaching needs: the rep, the call length, the disposition, both numbers, the DataSift record and a direct recording link. `chs-sms-agent` reads that log through a saved smrtPhone login on its volume, the same login it uses to pause texts when a rep calls a seller.
+2. Each morning the job asks the agent for yesterday's calls (`GET /hooks/<secret>/calls`). It keeps calls that have a recording and last at least 60 seconds (or 15 seconds with a contact disposition), and skips any call already on the sheet.
 3. It randomly picks up to 3 calls per rep. Each one is transcribed by an audio model, which also notes tone and pace, and triaged as a conversation, voicemail or wrong number.
 4. Real conversations are graded by Claude against the matching rubric (`skills/cold-call-coach`, `lead-manager-coach` or `closer-coach`, picked from what the call was about). Rubric rules apply: auto-fail conditions, short-call handling, and a quote behind every point.
 5. The job adds one row per call to the call audit sheet and posts the summary to Slack. An auto-fail is flagged for manager review.
@@ -21,21 +21,22 @@ Cost: about $0.01 for transcription plus $0.05 to $0.15 for grading per call. At
 
 ## One-time setup
 
-### 1. Kixie: send End Call webhooks to the agent
+### 1. smrtPhone: save a login for the agent
 
-Kixie > Manage > Automations > Webhooks > add **End Call** pointing at:
+Call recording must be on for every rep in smrtPhone.
 
-```
-https://chs-sms-agent.fly.dev/hooks/<SMS_AGENT_WEBHOOK_SECRET>/kixie
-```
+1. On the office machine, from the repo root, run `python src/call_coaching/smrtphone_login.py`. A browser opens. Log in to smrtPhone by hand, including any 2FA, then press Enter in the console.
+2. The script saves the login and prints a PowerShell line. Run that line; it copies the login, base64-encoded, to the clipboard.
+3. In GitHub, Settings > Secrets and variables > Actions, add a secret `SMRTPHONE_SESSION` and paste.
+4. Run Actions > "Upload smrtPhone session". It posts the login to the agent, and fails if smrtPhone rejects it.
 
-Kixie is only used for calls; texting runs through smrtPhone, so do not add Kixie's SMS webhook. Also add **Call Disposition** to the same URL if you want reps' dispositions on the sheet. Call recording must be on for every rep in Kixie. The same End Call webhook also pauses the AI texting thread when a rep has a real call with a seller.
+Repeat these four steps whenever the coaching Slack post says the smrtPhone login has expired. The same login lets the agent pause texts when a rep calls a seller, so an expired login also stops that.
 
 ### 2. Redeploy chs-sms-agent
 
-Run GitHub Actions > "Deploy SMS agent" on this branch so the agent gets the new `/calls` endpoint. This does not change texting behavior.
+Run GitHub Actions > "Deploy CHS SMS agent" on main so the agent gets the smrtPhone call log and the login endpoint. It also turns on the 5-minute sweep that pauses a seller's texts after a rep's real call, and the backstop that recovers dropped replies. Texting itself stays in dry run. If Kixie webhooks were ever pointed at the agent, delete them in Kixie (Manage > Automations > Webhooks); the agent no longer has a Kixie endpoint.
 
-Optional: add a repo secret `SMS_AGENT_REP_NUMBERS` mapping each rep's Kixie number to their name, for example `{"+12085550100": "Nick"}`. Without it, reps are named from Kixie's caller ID name. Check the first Slack post: if a rep shows up under the seller's name or a phone number, add the map and redeploy.
+Reps are named by their smrtPhone user name. Use those names in `CALL_COACH_REP_ROLES` and `CALL_COACH_EXCLUDE`.
 
 ### 3. Google: service account and the two sheets
 
@@ -80,10 +81,10 @@ Variables tab (optional, not secret):
 
 ### 6. First runs
 
-1. Actions > "Daily call coaching (Kixie)" > Run workflow with **dry run** checked. The log lists the calls it would grade. If it reports 0 calls logged, the End Call webhook from step 1 is not reaching the agent.
+1. Actions > "Daily call coaching (smrtPhone)" > Run workflow with **dry run** checked. The log lists the calls it would grade. If it says the smrtPhone login is missing or expired, redo step 1.
 2. Write the call audit header row once, from a machine that has the key:
-   `python src/call_coaching/kixie_daily_audit.py --init-sheet` (with `GOOGLE_SERVICE_ACCOUNT_KEY` and `CALL_AUDIT_SPREADSHEET_ID` set).
-   Or paste the headers by hand from `HEADERS` in `kixie_daily_audit.py`.
+   `python src/call_coaching/chs_daily_audit.py --init-sheet` (with `GOOGLE_SERVICE_ACCOUNT_KEY` and `CALL_AUDIT_SPREADSHEET_ID` set).
+   Or paste the headers by hand from `HEADERS` in `chs_daily_audit.py`.
 3. Run the call coaching workflow again with dry run off. Check the sheet and the Slack post.
 4. Actions > "Daily KPI digest" > Run workflow with **dry run** checked, then without.
 
@@ -96,13 +97,15 @@ Each rep adds one row per day to their role's tab of the KPI sheet:
 | Cold caller / texter | First to Market | Ninja Name |
 | Lead manager | Lead Management | Name |
 | Acquisitions | Acquisition | Name |
-| Anyone (optional, from Kixie's reports) | Dialer | Caller |
+| Anyone (optional, from smrtPhone's dialer reports) | Dialer | Caller |
 
 Use the same spelling of your name every day, and a date like `10/07/2026`. Blank cells count as 0. The 5 PM digest reads what is there at that time. Rows added later show up in the next day's week-to-date totals.
 
 ## Troubleshooting
 
-- **"could not reach the SMS agent call log"** in Slack: the agent is down or the secret differs. Check `https://chs-sms-agent.fly.dev/health`. If `SMS_AGENT_ALLOWED_IPS` is set on the agent, GitHub's runners are blocked; leave it unset.
+- **"smrtPhone login is missing or expired"** in Slack: redo step 1 (capture a login, update `SMRTPHONE_SESSION`, run "Upload smrtPhone session").
+- **"could not read the smrtPhone call log from the SMS agent"** in Slack: the agent is down or the secret differs. Check `https://chs-sms-agent.fly.dev/health`. If `SMS_AGENT_ALLOWED_IPS` is set on the agent, GitHub's runners are blocked; leave it unset.
 - **PERMISSION_DENIED** writing the call audit sheet: it is not shared with the service account as Editor.
 - **A KPI section shows all zeros**: a header on that tab was renamed. The bot matches header text exactly, apart from leading and trailing spaces. `docs/kpi/KPI-REFERENCE.md` lists the expected headers.
-- **Calls graded under the wrong rep**: set `SMS_AGENT_REP_NUMBERS` (step 2).
+- **Calls graded under the wrong rep**: the rep is smrtPhone's user on the call. Fix the user's name in smrtPhone, or the role pin in `CALL_COACH_REP_ROLES`.
+- **"Upload smrtPhone session" says smrtPhone rejected the login**: capture a fresh one. If a fresh login is still rejected, smrtPhone may be tying the login to the office network; tell whoever maintains the agent.
