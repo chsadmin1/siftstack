@@ -1614,6 +1614,9 @@ def run(live_model: bool = False) -> int:
                 r.check("login status never echoes a cookie", "laravel_session" not in resp.text, resp.text[:200])
                 resp = client.get("/hooks/wrong-secret/smrtphone-session")
                 r.check("login status rejects a wrong secret", resp.status_code == 404, f"got {resp.status_code}")
+                r.check("access logs mask the webhook secret",
+                        receiver.redact('"GET /hooks/Sek_ret-9/calls?since=a HTTP/1.1"') == '"GET /hooks/***/calls?since=a HTTP/1.1"')
+                r.check("access logs mask a ?secret= query", receiver.redact("/x?secret=abc&y=1") == "/x?secret=***&y=1")
 
                 def _no_login(since, until):
                     raise call_log.SessionError("no smrtPhone session")

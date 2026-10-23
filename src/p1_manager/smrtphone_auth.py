@@ -103,6 +103,31 @@ def clean_secret(value: str) -> str:
     return re.sub(r"[\s-]", "", value).upper()
 
 
+def key_problem(secret: str) -> str:
+    """Why an authenticator key cannot work, in plain words; "" when it looks right.
+
+    A key is base32: the letters A to Z and the digits 2 to 7, usually 16 to
+    64 of them. Says what is wrong without ever repeating the key.
+    """
+    key = clean_secret(secret).rstrip("=")
+    if not key:
+        return "the authenticator key is empty"
+    if key.isdigit():
+        return (f"the saved authenticator key is {len(key)} digits, which looks like a one-time code "
+                "or a recovery code rather than the key")
+    bad = []
+    if re.search(r"[0189]", key):
+        bad.append("the digits 0, 1, 8 or 9")
+    if re.search(r"[^A-Z0-9]", key):
+        bad.append("symbols")
+    if bad:
+        return (f"the saved authenticator key has {len(key)} characters, including {' and '.join(bad)}. "
+                "A key only uses the letters A to Z and the digits 2 to 7")
+    if len(key) < 16:
+        return f"the saved authenticator key has only {len(key)} characters; a key is usually 16 to 64"
+    return ""
+
+
 def totp(secret: str, at: float | None = None, digits: int = 6, period: int = 30) -> str:
     """RFC 6238 code from an authenticator key (SHA-1, the authenticator default)."""
     key_b32 = clean_secret(secret)
@@ -366,6 +391,9 @@ def _switch_to_app(s: requests.Session, resp: requests.Response) -> requests.Res
 
 def login(email: str, password: str, totp_secret: str = "", cookies: list[dict] | None = None) -> Result:
     """Log in, or confirm the stored cookies still work. Raises LoginError."""
+    if totp_secret and key_problem(totp_secret):
+        raise LoginError("key", key_problem(totp_secret) + ". Copy the key smrtPhone shows under the QR code"
+                         " again and paste it into the SMRTPHONE_TOTP_SECRET secret in GitHub")
     s = _session(cookies)
     if cookies and check_call_log(s):
         return Result("ok", state={"cookies": export_cookies(s), "origins": []},

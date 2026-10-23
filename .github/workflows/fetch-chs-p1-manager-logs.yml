@@ -10,6 +10,9 @@ jobs:
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Recent logs
-        run: flyctl logs -a chs-p1-manager --no-tail
+        run: |
+          # Run logs are public on this repo, so secrets in request paths
+          # (/hooks/<secret>/..., ?secret=...) are masked before printing.
+          flyctl logs -a chs-p1-manager --no-tail | sed -E 's#(secret=)[^&[:space:]"]+#\1***#g; s#(/hooks/)[^/[:space:]"]+/#\1***/#g'
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

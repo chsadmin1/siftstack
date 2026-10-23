@@ -360,6 +360,67 @@ def test_trigger_reports_the_outcome():
     assert body["job"] == "smrtphone" and body["status"] == "ok", body
 
 
+def test_a_bad_authenticator_key_is_named_before_any_login():
+    assert auth.key_problem(SECRET) == ""
+    assert "one-time code" in auth.key_problem("123456")
+    assert "0, 1, 8 or 9" in auth.key_problem("ABCD1234EFGH5678IJKL")
+    assert "symbols" in auth.key_problem("ABCD-EFGH_IJKL+MNOP")
+    site = _use(FakeSmrtPhone())
+    try:
+        auth.login("chs@example.com", "right", "123456")
+        raise AssertionError("a bad key must fail")
+    except auth.LoginError as exc:
+        assert exc.stage == "key" and "SMRTPHONE_TOTP_SECRET" in exc.plain
+        assert "123456" not in exc.plain, "the key is never repeated"
+    assert site.posts == [], "nothing was sent to smrtPhone"
+    h = Harness()
+    h.creds(totp="98765432")
+    out = keeper.run_check(h.post)
+    assert out["status"] == "failed" and out["stage"] == "key", out
+    assert "SMRTPHONE_TOTP_SECRET" in h.posts[0] and "98765432" not in h.posts[0]
+
+
+def test_an_unexpected_error_becomes_a_message():
+    h = Harness()
+    h.creds()
+    real = auth.login
+    auth.login = lambda *a, **k: (_ for _ in ()).throw(KeyError("boom"))
+    try:
+        out = keeper.run_check(h.post)
+    finally:
+        auth.login = real
+    assert out["status"] == "failed" and out["stage"] == "unexpected", out
+    assert "unexpected" in h.posts[0]
+
+
+def test_trigger_never_answers_500():
+    from fastapi.testclient import TestClient
+
+    import slack_app
+    os.environ["P1_TRIGGER_SECRET"] = "trig"
+    real = keeper.run_check
+    keeper.run_check = lambda post, force=False: (_ for _ in ()).throw(RuntimeError("x"))
+    try:
+        with TestClient(slack_app.app) as client:
+            resp = client.post("/trigger/smrtphone?secret=trig")
+    finally:
+        keeper.run_check = real
+    assert resp.status_code == 200 and resp.json()["status"] == "error", resp.text
+
+
+def test_secrets_are_masked_in_access_logs():
+    import logging
+
+    import slack_app
+    assert slack_app.redact("POST /trigger/smrtphone?secret=AbC-1_2&force=true") ==         "POST /trigger/smrtphone?secret=***&force=true"
+    assert slack_app.redact("GET /hooks/Sek_ret-9/calls") == "GET /hooks/***/calls"
+    rec = logging.LogRecord("uvicorn.access", 20, "", 0, '%s - "%s %s HTTP/%s" %d',
+                            ("1.2.3.4:5", "POST", "/trigger/weekly?secret=s3cr3t&commit=true", "1.1", 200), None)
+    for f in logging.getLogger("uvicorn.access").filters:
+        f.filter(rec)
+    assert "s3cr3t" not in rec.getMessage() and "secret=***" in rec.getMessage()
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

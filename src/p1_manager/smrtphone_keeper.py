@@ -201,12 +201,23 @@ def run_check(post, force: bool = False) -> dict:
         try:
             result = smrtphone_auth.login(email, password, totp_secret, cookies=data.get("cookies"))
         except smrtphone_auth.LoginError as exc:
+            pass_through = exc
+        except Exception as exc:  # noqa: BLE001 - a bug here must become a message, not a crash
+            log.exception("smrtPhone keeper: unexpected login error")
+            pass_through = smrtphone_auth.LoginError("unexpected", f"something unexpected went wrong"
+                                                                   f" ({exc.__class__.__name__})")
+        else:
+            pass_through = None
+        if pass_through is not None:
+            exc = pass_through
             data["last_error"] = exc.plain
             save(data)
             hint = (" Check that the SMRTPHONE_LOGIN_PASSWORD secret in GitHub still matches the smrtPhone"
                     " password." if exc.stage == "password" else "")
             if exc.stage == "code" and totp_secret:
                 hint = (" The authenticator key may be wrong; check the SMRTPHONE_TOTP_SECRET secret in GitHub.")
+            if exc.stage == "key":
+                hint = " Then run Actions > \"Check smrtPhone login\" again."
             _alert(data, post, f"failed:{exc.stage}",
                    f":warning: *The texting robot couldn't log back in to smrtPhone:* {exc.plain}. " + _impact()
                    + hint + f" To renew it by hand, see {SETUP_DOC}.")
